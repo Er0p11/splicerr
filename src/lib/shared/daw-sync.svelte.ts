@@ -4,7 +4,6 @@ import type { SampleAsset } from "$lib/splice/types"
 import { globalAudio } from "$lib/shared/audio.svelte"
 import { saveDawStretchedSampleInfo } from "$lib/shared/files.svelte"
 import { semitonesFor } from "$lib/shared/transpose.svelte"
-import { cancelAudioRenderWorker } from "$lib/shared/audio-render-worker-client"
 
 const MIN_PLAYBACK_RATE = 0.25
 const MAX_PLAYBACK_RATE = 4
@@ -723,7 +722,6 @@ function resetPluginSampleState() {
     sampleLoadGeneration++
     sampleLoadAbortController?.abort()
     sampleLoadAbortController = null
-    cancelAudioRenderWorker()
     dawSync.loadedSampleDurationSeconds = 0
     dawSync.samplePositionSeconds = null
     dawSync.sampleActive = null
@@ -731,9 +729,11 @@ function resetPluginSampleState() {
 
 function updateConnectionStatus() {
     const connected = Date.now() - dawSync.lastPacketAt < 1500
+    if (connected === dawSync.connected) return
     dawSync.connected = connected
     if (!connected) {
         applyAppDawMute(false)
+        globalAudio.ref?.pause()
         dawSync.playing = false
         dawSync.audioPort = 0
         resetPluginSampleState()

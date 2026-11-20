@@ -10,6 +10,8 @@
     import Label from "$lib/components/ui/label/label.svelte"
     import {
         config,
+        MAX_PRELOAD_SAMPLES,
+        normalizePreloadCount,
         isSamplesDirValid,
         saveConfig,
         settingsDialog,
@@ -78,7 +80,7 @@
 </script>
 
 <Dialog.Root bind:open={settingsDialog.open}>
-    <Dialog.Content>
+    <Dialog.Content class="max-h-[90vh] overflow-y-auto">
         <Dialog.Header>
             <Dialog.Title>Settings</Dialog.Title>
         </Dialog.Header>
@@ -207,6 +209,29 @@
                         {config.repeat_audio ? "Enabled" : "Disabled"}
                     </Label>
                 </div>
+            </div>
+            <div class="flex flex-col gap-2">
+                <Label for="preload-samples">Preload previews</Label>
+                <p class="text-muted-foreground text-sm" id="preload-samples-description">
+                    Buffer this many previews starting at the top visible sample.
+                    Set to 0 to turn preloading off.
+                </p>
+                <Input
+                    id="preload-samples"
+                    aria-describedby="preload-samples-description"
+                    class="w-28"
+                    type="number"
+                    min={0}
+                    max={MAX_PRELOAD_SAMPLES}
+                    step={1}
+                    value={config.preload_samples}
+                    onchange={(event) => {
+                        const count = normalizePreloadCount(event.currentTarget.valueAsNumber)
+                        config.preload_samples = count
+                        event.currentTarget.value = String(count)
+                        void saveConfig()
+                    }}
+                />
             </div>
             <div class="flex flex-col gap-2">
                 <Label>DAW Bridge</Label>

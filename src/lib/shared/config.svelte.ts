@@ -11,6 +11,23 @@ import {
 import { resetMode, setMode } from "mode-watcher"
 
 const CONFIG_FILE_NAME = "config.json"
+export const MAX_PRELOAD_SAMPLES = 30
+export const MIN_MANUAL_BPM = 20
+export const MAX_MANUAL_BPM = 400
+
+export function normalizeManualBpm(value: unknown): number | null {
+    if (
+        typeof value !== "number" || !Number.isFinite(value) ||
+        value < MIN_MANUAL_BPM || value > MAX_MANUAL_BPM
+    ) return null
+    return Math.round(value * 10) / 10
+}
+
+export function normalizePreloadCount(value: unknown) {
+    return typeof value === "number" && Number.isFinite(value)
+        ? Math.max(0, Math.min(MAX_PRELOAD_SAMPLES, Math.round(value)))
+        : DEFAULT_CONFIG.preload_samples
+}
 
 export type UITheme = "system" | "light" | "dark" | "dre4moff"
 
@@ -39,6 +56,11 @@ const DEFAULT_CONFIG = {
     ui_scale: 1,
     cut_mp3_delay: true,
     repeat_audio: true,
+    preload_samples: 12,
+    manual_bpm: null as number | null,
+    always_on_top: false,
+    compact_view: false,
+    expanded_width: 800,
     transpose: { ...DEFAULT_TRANSPOSE } as TransposeConfig,
 }
 
@@ -86,6 +108,8 @@ export async function loadConfig() {
         const transpose = { ...DEFAULT_TRANSPOSE, ...(parsed.transpose ?? {}) }
         Object.assign(config, parsed)
         config.transpose = transpose
+        config.manual_bpm = normalizeManualBpm(config.manual_bpm)
+        config.preload_samples = normalizePreloadCount(config.preload_samples)
         console.log("📂 Config loaded")
     }
 
@@ -97,7 +121,15 @@ export async function loadConfig() {
     await validateSamplesDir()
 }
 
-export async function saveConfig() {
+let pendingSave: Promise<void> = Promise.resolve()
+
+export function saveConfig() {
+    const save = pendingSave.then(writeConfig)
+    pendingSave = save.catch(() => {})
+    return save
+}
+
+async function writeConfig() {
     await validateSamplesDir()
 
     const appConfig = await appConfigDir()

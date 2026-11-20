@@ -12,7 +12,7 @@ import type {
     TagSummaryEntry,
 } from "$lib/splice/types"
 import { globalAudio } from "./audio.svelte"
-import { loading } from "./loading.svelte"
+import { beginSampleLoad, loading } from "./loading.svelte"
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
 import { semitonesFor } from "./transpose.svelte"
 import { decodeAudioFromURL } from "./wav"
@@ -87,7 +87,15 @@ export const storeCallbacks = $state({
     onbeforetagsupdate: null as (() => void) | null,
 })
 
-let currentQueryIdentity: string = ""
+let currentQueryIdentity = ""
+let latestFetch = 0
+let retryMore = false
+let lastPage = 0
+let preloadWindow = new Map<string, SampleAsset>()
+let attemptedPreloads = new Set<string>()
+let activePreloads = 0
+const MAX_PRELOAD_REQUESTS = 2
+const sourceDownloads = new Map<string, Promise<string>>()
 
 async function fetchBinaryResponse(url: string, signal?: AbortSignal) {
     try {
@@ -109,13 +117,14 @@ function touchMapEntry<T>(map: Map<string, T>, key: string) {
 }
 
 function trimDescrambledCache() {
-    for (const [uuid, blobURL] of dataStore.descrambledSamples) {
-        if (dataStore.descrambledSamples.size <= MAX_DESCRAMBLED_BLOBS) break
-        if (uuid === globalAudio.currentAsset?.uuid) continue
+    let recent = 0
+    for (const uuid of [...dataStore.descrambledSamples.keys()].reverse()) {
+        if (uuid === globalAudio.currentAsset?.uuid || preloadWindow.has(uuid)) continue
+        if (++recent <= MAX_DESCRAMBLED_BLOBS) continue
 
+        const blobURL = dataStore.descrambledSamples.get(uuid)!
         dataStore.descrambledSamples.delete(uuid)
         window.URL.revokeObjectURL(blobURL)
-        console.info("🧹 Trimmed descrambled sample blob")
     }
 }
 
@@ -130,182 +139,132 @@ function trimTransposedCache() {
     }
 }
 
-export const fetchAssets = () => {
-    const identityBeforeFetch = JSON.stringify(queryIdentity)
-    if (identityBeforeFetch != currentQueryIdentity) {
-        storeCallbacks.onbeforedataupdate?.()
-    }
+function requestAssets(more: boolean) {
+    const identity = JSON.stringify(queryIdentity)
+    if (
+        more &&
+        (loading.assets || identity !== currentQueryIdentity ||
+            queryStore.page >= lastPage)
+    ) return
+
+    const page = more ? queryStore.page + 1 : 1
+    const request = ++latestFetch
+    if (!more) storeCallbacks.onbeforedataupdate?.()
     loading.assets = true
+
+    const isLatest = () => request === latestFetch && identity === JSON.stringify(queryIdentity)
     querySplice(SamplesSearch, {
         ...queryIdentity,
-        page: queryStore.page,
+        page,
         limit: PER_PAGE,
     })
         .then((response) => {
-            const searchResult = (response as SamplesSearchResponse).data
-                .assetsSearch
-            const identityAfterFetch = JSON.stringify(queryIdentity)
-            if (identityBeforeFetch == identityAfterFetch) {
-                if (identityBeforeFetch == currentQueryIdentity) {
-                    dataStore.sampleAssets.push(...searchResult.items)
-                    console.info("➕ Loaded more assets")
-                } else {
-                    // Free descrambled samples that are not in the new search result / currently selected
-                    for (const sampleAsset of dataStore.sampleAssets) {
-                        if (
-                            !searchResult.items.some(
-                                (other) => sampleAsset.uuid == other.uuid
-                            ) &&
-                            sampleAsset.uuid != globalAudio.currentAsset?.uuid
-                        ) {
-                            freeDescrambledSample(sampleAsset.uuid)
-                        }
-                    }
-                    // Prevent duplicates
-                    dataStore.sampleAssets = searchResult.items.filter(
-                        (asset) =>
-                            !dataStore.sampleAssets.some(
-                                (other) => other.uuid == asset.uuid
-                            )
-                    )
-                    currentQueryIdentity = identityAfterFetch
-                    queryStore.page = 1
-                    console.info("🔄️ Loaded new assets")
-                }
-                dataStore.total_records = searchResult.response_metadata.records
+            if (!isLatest()) return
+            const { items, pagination_metadata, response_metadata, tag_summary } =
+                (response as SamplesSearchResponse).data.assetsSearch
 
-                storeCallbacks.onbeforetagsupdate?.()
-                dataStore.tag_summary = searchResult.tag_summary
+            const seen = new Set(more ? dataStore.sampleAssets.map((sample) => sample.uuid) : [])
+            const samples = items.filter((sample) => {
+                if (seen.has(sample.uuid)) return false
+                seen.add(sample.uuid)
+                return true
+            })
+            if (more) dataStore.sampleAssets.push(...samples)
+            else dataStore.sampleAssets = samples
 
-                loading.assets = false
-                loading.beforeFirstLoad = false
-
-                loading.fetchError = null
-            } else {
-                console.info("🕜 Ignored stale assets")
-            }
+            currentQueryIdentity = identity
+            queryStore.page = page
+            lastPage = pagination_metadata.totalPages
+            dataStore.total_records = response_metadata.records
+            storeCallbacks.onbeforetagsupdate?.()
+            dataStore.tag_summary = tag_summary
+            loading.beforeFirstLoad = false
+            loading.fetchError = null
         })
         .catch((error: Error) => {
-            console.error("⚠️ Failed to fetch assets", error)
+            if (!isLatest()) return
+            console.error("Failed to fetch assets", error)
+            retryMore = more
             loading.fetchError = error
-            loading.assets = false
+        })
+        .finally(() => {
+            if (request === latestFetch) loading.assets = false
         })
 }
 
-export async function getDescrambledSampleURL(sampleAsset: SampleAsset) {
-    const existingBlobURL = touchMapEntry(
-        dataStore.descrambledSamples,
-        sampleAsset.uuid
-    )
-    if (existingBlobURL) {
-        console.info("✔️ Reusing descrambled sample blob")
-        return existingBlobURL
+export const fetchAssets = () => requestAssets(false)
+export const fetchMoreAssets = () => requestAssets(true)
+export const retryAssets = () => requestAssets(retryMore && currentQueryIdentity === JSON.stringify(queryIdentity))
+
+export function setSamplePreloadWindow(samples: SampleAsset[]) {
+    preloadWindow = new Map(samples.map((sample) => [sample.uuid, sample]))
+    attemptedPreloads = new Set([...attemptedPreloads].filter((uuid) => preloadWindow.has(uuid)))
+    trimDescrambledCache()
+    fillPreloadSlots()
+}
+
+function fillPreloadSlots() {
+    for (const sample of preloadWindow.values()) {
+        if (activePreloads >= MAX_PRELOAD_REQUESTS) break
+        if (dataStore.descrambledSamples.has(sample.uuid) || attemptedPreloads.has(sample.uuid)) continue
+
+        attemptedPreloads.add(sample.uuid)
+        activePreloads++
+        void getDescrambledSampleURL(sample)
+            .catch((error) => console.debug("Preview preload failed", sample.uuid, error))
+            .finally(() => {
+                activePreloads--
+                fillPreloadSlots()
+            })
     }
+}
 
-    loading.samples.add(sampleAsset.uuid)
-    loading.samplesCount++
+export function getDescrambledSampleURL(sampleAsset: SampleAsset): Promise<string> {
+    const uuid = sampleAsset.uuid
+    const cached = touchMapEntry(dataStore.descrambledSamples, uuid)
+    if (cached) return Promise.resolve(cached)
+    const pending = sourceDownloads.get(uuid)
+    if (pending) return pending
 
-    // A failing fetch/descramble must still clear the loading flag, otherwise the
-    // sample stays stuck "loading" forever (endless spinner) and every later play
-    // bails out early. This bites samples in a collection whose cached CDN url has
-    // expired and couldn't be refreshed (see refreshCollectionUrls).
-    try {
-        let response = await fetchBinaryResponse(sampleAsset.files[0].url)
-        if (!response.ok) {
-            // The presigned url likely expired mid-session. Re-resolve it from the
-            // parent pack and retry once before giving up.
-            const refreshed = await refreshSampleUrl(sampleAsset)
-            if (refreshed) {
-                response = await fetchBinaryResponse(sampleAsset.files[0].url)
-            }
-        }
-        if (!response.ok) {
-            throw new Error(
-                `Sample fetch failed (${response.status} ${response.statusText}) — the CDN url is likely expired`
-            )
-        }
-
-        const data = new Uint8Array(await response.arrayBuffer())
-
-        const descrambledData = descrambleSample(data)
-
-        const blob = new Blob([descrambledData], {
-            type: "audio/mp3",
-        })
-
-        const blobURL = window.URL.createObjectURL(blob)
-
-        dataStore.descrambledSamples.set(sampleAsset.uuid, blobURL)
+    const download = downloadSampleBytes(sampleAsset).then((bytes) => {
+        const url = window.URL.createObjectURL(new Blob([bytes], { type: "audio/mp3" }))
+        dataStore.descrambledSamples.set(uuid, url)
         trimDescrambledCache()
-
-        console.info("🔗 Created descrambled sample blob")
-
-        return blobURL
-    } finally {
-        loading.samples.delete(sampleAsset.uuid)
-        loading.samplesCount--
-    }
+        return url
+    }).finally(() => sourceDownloads.delete(uuid))
+    sourceDownloads.set(uuid, download)
+    return download
 }
 
-export async function getDescrambledSampleBytes(
-    sampleAsset: SampleAsset,
-    signal?: AbortSignal
-) {
-    const throwIfAborted = () => {
-        if (signal?.aborted) {
-            throw new DOMException("Sample fetch cancelled", "AbortError")
-        }
-    }
-
-    loading.samples.add(sampleAsset.uuid)
-    loading.samplesCount++
-
+export async function getDescrambledSampleBytes(sampleAsset: SampleAsset, signal?: AbortSignal) {
+    const finishLoad = beginSampleLoad(sampleAsset.uuid)
     try {
-        throwIfAborted()
-        let response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
-        if (!response.ok) {
-            const refreshed = await refreshSampleUrl(sampleAsset)
-            if (refreshed) {
-                throwIfAborted()
-                response = await fetchBinaryResponse(
-                    sampleAsset.files[0].url,
-                    signal
-                )
-            }
+        const cached = touchMapEntry(dataStore.descrambledSamples, sampleAsset.uuid)
+        if (cached) {
+            const response = await window.fetch(cached, { signal })
+            return new Uint8Array(await response.arrayBuffer())
         }
-        if (!response.ok) {
-            throw new Error(
-                `Sample fetch failed (${response.status} ${response.statusText}) — the CDN url is likely expired`
-            )
-        }
-
-        throwIfAborted()
-        const data = new Uint8Array(await response.arrayBuffer())
-        throwIfAborted()
-        return descrambleSample(data)
+        return await downloadSampleBytes(sampleAsset, signal)
     } finally {
-        loading.samples.delete(sampleAsset.uuid)
-        loading.samplesCount--
+        finishLoad()
     }
 }
 
-export function freeDescrambledSample(uuid: string) {
-    // Free any pitch-shifted variants of this sample first
-    for (const key of [...dataStore.transposedSamples.keys()]) {
-        if (key.startsWith(`${uuid}:`)) {
-            window.URL.revokeObjectURL(dataStore.transposedSamples.get(key)!)
-            dataStore.transposedSamples.delete(key)
-        }
+async function downloadSampleBytes(sampleAsset: SampleAsset, signal?: AbortSignal) {
+    signal?.throwIfAborted()
+    let response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
+    // Collection URLs can expire between visits. Refresh and retry once.
+    if (!response.ok && await refreshSampleUrl(sampleAsset)) {
+        signal?.throwIfAborted()
+        response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
+    }
+    if (!response.ok) {
+        throw new Error(`Sample fetch failed (${response.status} ${response.statusText})`)
     }
 
-    const existingBlobURL = dataStore.descrambledSamples.get(uuid)
-    if (!existingBlobURL) return false
-
-    dataStore.descrambledSamples.delete(uuid)
-    window.URL.revokeObjectURL(existingBlobURL)
-    console.info("⛓️‍💥 Freed descrambled sample")
-
-    return true
+    const data = new Uint8Array(await response.arrayBuffer())
+    signal?.throwIfAborted()
+    return descrambleSample(data)
 }
 
 /**
@@ -323,8 +282,7 @@ export async function getTransposedSampleURL(
         return existing
     }
 
-    loading.samples.add(sampleAsset.uuid)
-    loading.samplesCount++
+    const finishLoad = beginSampleLoad(sampleAsset.uuid)
 
     try {
         const descrambledURL = await getDescrambledSampleURL(sampleAsset)
@@ -338,13 +296,17 @@ export async function getTransposedSampleURL(
         const blobURL = window.URL.createObjectURL(
             new Blob([wavData], { type: "audio/wav" })
         )
+        const previous = dataStore.transposedSamples.get(cacheKey)
+        if (previous) {
+            window.URL.revokeObjectURL(blobURL)
+            return previous
+        }
         dataStore.transposedSamples.set(cacheKey, blobURL)
         trimTransposedCache()
         console.info(`🎚️ Created transposed sample blob (${semitones} st)`)
         return blobURL
     } finally {
-        loading.samples.delete(sampleAsset.uuid)
-        loading.samplesCount--
+        finishLoad()
     }
 }
 

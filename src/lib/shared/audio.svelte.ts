@@ -1,12 +1,10 @@
-import type { PackAsset, SampleAsset } from "$lib/splice/types"
-import { loading } from "$lib/shared/loading.svelte"
+import type { SampleAsset } from "$lib/splice/types"
 import { config } from "$lib/shared/config.svelte"
-import {
-    dataStore,
-    freeDescrambledSample,
-    getPlaybackSampleURL,
-} from "$lib/shared/store.svelte"
+import { getPlaybackSampleURL } from "$lib/shared/store.svelte"
+import { toast } from "$lib/shared/toasts.svelte"
 
+let playbackRequest = 0
+let loadedAssetUuid: string | null = null
 let prevVolume = 0.8
 
 export const globalAudio = $state({
@@ -21,6 +19,16 @@ export const globalAudio = $state({
         return this.currentTime / this.duration
     },
     togglePlay() {
+        if (!this.currentAsset) return
+        if (this.loading && loadedAssetUuid !== this.currentAsset.uuid) {
+            playbackRequest++
+            this.loading = false
+            return
+        }
+        if (loadedAssetUuid !== this.currentAsset.uuid) {
+            void this.playSampleAsset(this.currentAsset)
+            return
+        }
         this.paused = !this.paused
     },
     toggleMute() {
@@ -31,69 +39,46 @@ export const globalAudio = $state({
             this.volume = prevVolume
         }
     },
-    async selectSampleAsset(sampleAsset: SampleAsset, play: boolean = true) {
-        if (this.currentAsset?.uuid != sampleAsset.uuid) {
-            this.paused = true
-            this.currentTime = 0
+    selectSampleAsset(sampleAsset: SampleAsset) {
+        if (this.currentAsset?.uuid === sampleAsset.uuid) return
 
-            if (this.currentAsset) {
-                if (
-                    !dataStore.sampleAssets.some(
-                        (other) => this.currentAsset?.uuid == other.uuid
-                    )
-                ) {
-                    freeDescrambledSample(this.currentAsset.uuid)
-                }
-            }
-
-            this.currentAsset = sampleAsset
-            // this.ref.src = await getDescrambledSampleURL(sampleAsset)
-        }
-        // if (play) {
-        //     this.playSampleAsset(sampleAsset)
-        // }
-        // TODO: this is kinda borked
-    },
-    async playSampleAsset(sampleAsset: SampleAsset, from: number = 0) {
-        if (loading.samples.has(sampleAsset.uuid)) {
-            console.info("🐢 Already loading sample")
-            return
-        }
-        this.ref.src = ""
+        playbackRequest++
+        loadedAssetUuid = null
+        this.ref.pause()
+        this.ref.removeAttribute("src")
+        this.ref.load()
+        this.paused = true
         this.currentTime = 0
-
-        if (this.currentAsset) {
-            if (
-                !dataStore.sampleAssets.some(
-                    (other) => this.currentAsset?.uuid == other.uuid
-                )
-            ) {
-                freeDescrambledSample(this.currentAsset.uuid)
-            }
-        }
-
+        this.duration = 0
+        this.loading = false
         this.currentAsset = sampleAsset
-        this.ref.src = await getPlaybackSampleURL(sampleAsset)
-        if (this.currentAsset.uuid != sampleAsset.uuid) {
-            return
-        }
-        this.ref.currentTime = from
-        this.ref.loop = sampleAsset.asset_category_slug == "loop" && config.repeat_audio
-        this.ref.play()
     },
-    // Reload the currently playing sample (e.g. after transpose settings change),
-    // preserving playback position and play/pause state.
+    async playSampleAsset(sampleAsset: SampleAsset, from = 0, play = true) {
+        this.selectSampleAsset(sampleAsset)
+        const request = ++playbackRequest
+        this.loading = true
+        try {
+            const src = await getPlaybackSampleURL(sampleAsset)
+            if (request !== playbackRequest) return
+
+            if (this.ref.src !== src) this.ref.src = src
+            loadedAssetUuid = sampleAsset.uuid
+            this.ref.currentTime = from
+            this.ref.loop = sampleAsset.asset_category_slug === "loop" && config.repeat_audio
+            if (play) await this.ref.play()
+            else this.ref.pause()
+        } catch (error) {
+            if (request !== playbackRequest || (error instanceof DOMException && error.name === "AbortError")) return
+            console.error("Failed to play sample", error)
+            toast({ title: "Could not play sample", variant: "error" })
+        } finally {
+            if (request === playbackRequest) this.loading = false
+        }
+    },
     async reloadCurrent() {
         const asset = this.currentAsset
-        if (!asset) return
-        const wasPaused = this.paused
-        const from = this.ref.currentTime || 0
-        const src = await getPlaybackSampleURL(asset)
-        if (this.currentAsset?.uuid != asset.uuid) return
-        this.ref.src = src
-        this.ref.currentTime = from
-        this.ref.loop =
-            asset.asset_category_slug == "loop" && config.repeat_audio
-        if (!wasPaused) this.ref.play()
+        if (!asset || (loadedAssetUuid !== asset.uuid && !this.loading)) return
+        const pendingStart = loadedAssetUuid !== asset.uuid && this.loading
+        await this.playSampleAsset(asset, this.ref.currentTime || 0, pendingStart || !this.paused)
     },
 })

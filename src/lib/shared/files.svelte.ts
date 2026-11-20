@@ -15,6 +15,7 @@ import {
     decodeAudioFromURL,
 } from "$lib/shared/wav"
 import { renderAudioBufferToWav } from "$lib/shared/audio-render-worker-client"
+import { manualTempoRatio } from "$lib/shared/tempo"
 
 export type DawStretchedSample = {
     path: string
@@ -30,17 +31,18 @@ type EncodeOptions = {
 const sanitizePath = (path: string) => path.replace(/[^a-zA-Z0-9#_\-\.\/]/g, "_")
 
 // Insert a suffix (e.g. transpose tag) right before the file extension.
-const withSuffix = (name: string, suffix: string) => {
-    if (!suffix) return name
+const withSuffix = (name: string, suffix: string, forceWav: boolean) => {
+    if (!suffix && !forceWav) return name
     const dot = name.lastIndexOf(".")
-    return dot === -1
-        ? name + suffix
-        : name.slice(0, dot) + suffix + name.slice(dot)
+    const hasExtension = dot > name.lastIndexOf("/")
+    const stem = hasExtension ? name.slice(0, dot) : name
+    const extension = forceWav ? ".wav" : hasExtension ? name.slice(dot) : ""
+    return stem + suffix + extension
 }
 
-const sampleAssetPath = (sampleAsset: SampleAsset, suffix = "") =>
+const sampleAssetPath = (sampleAsset: SampleAsset, suffix: string, forceWav: boolean) =>
     sanitizePath(
-        `${sampleAsset.parents.items[0].name}/${withSuffix(sampleAsset.name, suffix)}`
+        `${sampleAsset.parents.items[0].name}/${withSuffix(sampleAsset.name, suffix, forceWav)}`
     )
 
 async function ensureFileDirectoryExists(filePath: string) {
@@ -51,7 +53,7 @@ async function ensureFileDirectoryExists(filePath: string) {
     for (const dir of dirs) {
         currentPath += dir + separator
         if (!(await exists(currentPath))) {
-            await mkdir(currentPath)
+            await mkdir(currentPath, { recursive: true })
         }
     }
 }
@@ -69,8 +71,10 @@ async function writeFileChunked(filePath: string, data: Uint8Array) {
     const chunkSize = 1024 * 1024
 
     try {
-        for (let offset = 0; offset < data.byteLength; offset += chunkSize) {
-            await file.write(data.subarray(offset, offset + chunkSize))
+        for (let offset = 0; offset < data.byteLength;) {
+            const written = await file.write(data.subarray(offset, offset + chunkSize))
+            if (!written) throw new Error("Could not write WAV data")
+            offset += written
             await nextFrame()
         }
     } finally {
@@ -78,7 +82,7 @@ async function writeFileChunked(filePath: string, data: Uint8Array) {
     }
 }
 
-export async function absoluteSamplePath(sampleAsset: SampleAsset, suffix = "") {
+export async function absoluteSamplePath(sampleAsset: SampleAsset, suffix = "", forceWav = false) {
     if (!config.samples_dir) {
         throw new Error("❌ Samples Directory not set")
     }
@@ -87,7 +91,7 @@ export async function absoluteSamplePath(sampleAsset: SampleAsset, suffix = "") 
         throw new Error("❌ Samples Directory invalid")
     }
 
-    return await join(config.samples_dir, sampleAssetPath(sampleAsset, suffix))
+    return await join(config.samples_dir, sampleAssetPath(sampleAsset, suffix, forceWav))
 }
 
 function estimatedRenderedDurationSeconds(
@@ -223,8 +227,8 @@ export async function saveDawStretchedSampleInfo(
         !oneShot && sourceBpm && sourceBpm > 0 && dawBpm > 0
             ? dawBpm / sourceBpm
             : 1
-    const suffix = `${transposeSuffix(semitones)}_daw_full_${Math.round(dawBpm)}bpm`
-    const absolutePath = await absoluteSamplePath(sampleAsset, suffix)
+    const suffix = `${transposeSuffix(semitones)}_daw_full_${Math.round(dawBpm * 100) / 100}bpm`
+    const absolutePath = await absoluteSamplePath(sampleAsset, suffix, true)
 
     if (!absolutePath) {
         throw new Error("❌ Invalid path")
@@ -273,6 +277,23 @@ export async function saveDawStretchedSample(
     dawBpm: number
 ) {
     return (await saveDawStretchedSampleInfo(sampleAsset, dawBpm)).path
+}
+
+export async function saveTempoAlignedSample(sampleAsset: SampleAsset, bpm: number) {
+    const tempoRatio = manualTempoRatio(sampleAsset, bpm)
+    if (tempoRatio === null) throw new Error("Sample cannot be aligned to that BPM")
+
+    const semitones = semitonesFor(sampleAsset)
+    const path = await absoluteSamplePath(
+        sampleAsset,
+        `${transposeSuffix(semitones)}_${bpm}bpm`,
+        true
+    )
+    if (!(await exists(path))) {
+        const wav = await encodeSampleWav(sampleAsset, semitones, tempoRatio)
+        await writeFileChunked(path, wav)
+    }
+    return path
 }
 
 export async function absolutePackImagePath(sampleAsset: SampleAsset) {

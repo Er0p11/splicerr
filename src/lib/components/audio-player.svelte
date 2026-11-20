@@ -19,16 +19,15 @@
     import Volume1 from "lucide-svelte/icons/volume-1"
     import Volume2 from "lucide-svelte/icons/volume-2"
     import Cable from "lucide-svelte/icons/cable"
-    import FileAudio from "lucide-svelte/icons/file-audio"
+    import TempoControls from "$lib/components/tempo-controls.svelte"
+    import { config } from "$lib/shared/config.svelte"
+    import { manualTempoRatio } from "$lib/shared/tempo"
+    import { windowView } from "$lib/shared/window-view.svelte"
     import TransposeDialog from "$lib/components/transpose-dialog.svelte"
     import {
         dawSync,
         toggleDawSyncedPlayback,
     } from "$lib/shared/daw-sync.svelte"
-    import {
-        handleDawSampleDrag,
-        prefetchDawSampleDrag,
-    } from "$lib/shared/drag.svelte"
 
     let {
         class: className,
@@ -59,13 +58,22 @@
               ? `Waiting for 4-bar phrase at bar ${dawSync.nextPhraseBarNumber}`
               : `Connected: ${dawSync.bpm?.toFixed(2) ?? "--"} BPM, bar ${dawSync.barNumber}`
     )
+    const previewRate = $derived(manualTempoRatio(globalAudio.currentAsset, config.manual_bpm) ?? 1)
+
+    $effect(() => {
+        if (!dawSync.connected && globalAudio.ref) {
+            globalAudio.ref.preservesPitch = true
+            globalAudio.ref.playbackRate = previewRate
+        }
+    })
+
     const progressCurrentTime = $derived(
-        dawSync.connected ? dawSync.visualCurrentTime : globalAudio.currentTime
+        dawSync.connected ? dawSync.visualCurrentTime : globalAudio.currentTime / previewRate
     )
     const progressDuration = $derived(
         dawSync.connected
             ? dawSync.visualDuration || 0
-            : globalAudio.duration || 0
+            : (globalAudio.duration || 0) / previewRate
     )
     const progressRatio = $derived(
         progressDuration > 0 ? progressCurrentTime / progressDuration : 0
@@ -76,7 +84,7 @@
 
     function handleProgressInput(event: Event) {
         if (dawSync.connected) return
-        globalAudio.currentTime = Number((event.currentTarget as HTMLInputElement).value)
+        globalAudio.currentTime = Number((event.currentTarget as HTMLInputElement).value) * previewRate
     }
 </script>
 
@@ -93,15 +101,9 @@
         bind:currentTime={globalAudio.currentTime}
         bind:duration={globalAudio.duration}
         bind:volume={globalAudio.volume}
-        onloadstart={() => {
-            globalAudio.loading = true
-            // TODO: Move into list component
-        }}
-        oncanplaythrough={() => {
-            globalAudio.loading = false
-        }}
     ></audio>
     <input
+        aria-label="Preview position"
         style="--progress: {progressRatio * 100 || 0}%"
         type="range"
         class="slider-nothumb h-1.5"
@@ -111,26 +113,26 @@
         value={progressCurrentTime}
         oninput={handleProgressInput}
         onclick={() => {
-            if (!dawSync.connected) globalAudio.ref.play()
+            if (!dawSync.connected && globalAudio.currentAsset && globalAudio.paused) globalAudio.togglePlay()
         }}
     />
-    <div class="flex min-h-0 flex-1 items-center justify-between py-2.5 px-5 gap-5">
-        <div class="flex gap-1.5">
+    <div class="flex min-h-0 flex-1 items-center justify-between py-2.5 px-3 gap-2">
+        <div class={cn("flex", windowView.compact ? "gap-0.5" : "gap-1.5")}>
             <Button
                 variant="ghost"
-                size="icon-lg"
+                size={windowView.compact ? "icon" : "icon-lg"}
                 class="rounded-full"
                 onclick={onprev}
                 disabled={!globalAudio.currentAsset}><SkipBack /></Button
             >
             <Button
                 variant="ghost"
-                size="icon-lg"
+                size={windowView.compact ? "icon" : "icon-lg"}
                 class="rounded-full bg-white/[0.12] hover:bg-white/[0.18]"
                 onclick={() => toggleDawSyncedPlayback()}
                 disabled={!globalAudio.currentAsset}
             >
-                {#if globalAudio.loading || loading.samplesCount}
+                {#if globalAudio.loading || (dawSync.connected && loading.samplesCount > 0 && loading.samples.has(globalAudio.currentAsset?.uuid ?? ""))}
                     <LoaderCircle class="animate-spin" />
                 {:else if playbackPaused}
                     <Play />
@@ -140,14 +142,14 @@
             </Button>
             <Button
                 variant="ghost"
-                size="icon-lg"
+                size={windowView.compact ? "icon" : "icon-lg"}
                 class="rounded-full"
                 onclick={onnext}
                 disabled={!globalAudio.currentAsset}><SkipForward /></Button
             >
         </div>
-        {#if globalAudio.currentAsset}
-            <div class="flex gap-4 items-center shrink min-w-64">
+        {#if globalAudio.currentAsset && !windowView.compact}
+            <div class="flex gap-2 items-center flex-1 min-w-0">
                 <PackPreview side="top" pack={currentPack} />
                 <div class="text-muted-foreground">
                     {#if globalAudio.currentAsset.asset_category_slug in assetIcons}
@@ -160,7 +162,7 @@
                         <CircleX class="group-hover:hidden" />
                     {/if}
                 </div>
-                <div class="min-w-32 overflow-clip">
+                <div class="min-w-0 overflow-clip">
                     <div
                         class="text-left pr-4 relative after:content-[''] after:absolute after:inset-y-0 after:right-0 after:w-5 after:bg-gradient-to-r after:from-transparent after:to-background/0 after:pointer-events-none"
                     >
@@ -212,6 +214,7 @@
                     <Tooltip.Trigger
                         class={cn(
                             "hidden sm:flex h-9 items-center gap-1.5 rounded-md px-2 text-xs font-medium tabular-nums",
+                            windowView.compact && "sm:hidden",
                             dawSync.connected
                                 ? dawSync.waitingForBar
                                   ? "glass-pill text-foreground"
@@ -227,43 +230,11 @@
                     </Tooltip.Content>
                 </Tooltip.Root>
             </Tooltip.Provider>
-            {#if globalAudio.currentAsset && dawSync.connected && dawSync.bpm}
-                <Tooltip.Provider>
-                    <Tooltip.Root>
-                        <Tooltip.Trigger
-                            class="glass-control hidden sm:flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground hover:text-foreground cursor-grab"
-                            draggable="true"
-                            onpointerdown={() =>
-                                prefetchDawSampleDrag(
-                                    globalAudio.currentAsset!,
-                                    dawSync.bpm!
-                                )}
-                            onmouseenter={() =>
-                                prefetchDawSampleDrag(
-                                    globalAudio.currentAsset!,
-                                    dawSync.bpm!
-                                )}
-                            ondragstart={(event) =>
-                                handleDawSampleDrag(
-                                    event,
-                                    globalAudio.currentAsset!,
-                                    dawSync.bpm!
-                                )}
-                        >
-                            <FileAudio class="size-4" />
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>
-                            Drag current sample stretched to {Math.round(
-                                dawSync.bpm
-                            )} BPM
-                        </Tooltip.Content>
-                    </Tooltip.Root>
-                </Tooltip.Provider>
-            {/if}
-            <TransposeDialog />
+            <TempoControls asset={globalAudio.currentAsset} />
+            {#if !windowView.compact}<TransposeDialog />{/if}
             <Button
                 variant="ghost"
-                size="icon-lg"
+                size={windowView.compact ? "icon" : "icon-lg"}
                 class="shrink-0 rounded-full"
                 onclick={() => globalAudio.toggleMute()}
             >
@@ -275,15 +246,20 @@
                     <Volume2 />
                 {/if}
             </Button>
-            <input
-                style="--progress: {globalAudio.volume * 100}%"
-                type="range"
-                class="slider-nothumb h-1.5 rounded-full"
-                min={0}
-                max={1}
-                step="any"
-                bind:value={globalAudio.volume}
-            />
+            {#if !windowView.compact}
+                <div class="hidden w-16 md:block">
+                    <input
+                        style="--progress: {globalAudio.volume * 100}%"
+                        type="range"
+                        class="slider-nothumb h-1.5 rounded-full"
+                        aria-label="Preview volume"
+                        min={0}
+                        max={1}
+                        step="any"
+                        bind:value={globalAudio.volume}
+                    />
+                </div>
+            {/if}
         </div>
     </div>
 </div>

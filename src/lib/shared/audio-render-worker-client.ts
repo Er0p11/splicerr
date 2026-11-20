@@ -116,17 +116,6 @@ function getWorker() {
     return worker
 }
 
-export function cancelAudioRenderWorker() {
-    if (!worker) return
-
-    for (const request of pending.values()) {
-        request.reject(abortError())
-    }
-    pending.clear()
-    worker.terminate()
-    worker = null
-}
-
 export async function renderAudioBufferToWav(
     buffer: AudioBuffer,
     options: RenderAudioOptions

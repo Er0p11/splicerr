@@ -2,13 +2,19 @@
     import SampleListEntry from "./sample-list-entry.svelte"
     import SearchInput from "$lib/components/search-input.svelte"
     import { ScrollArea } from "$lib/components/ui/scroll-area"
-    import { onMount, tick } from "svelte"
+    import { onDestroy, onMount, tick, untrack } from "svelte"
     import SortSelect from "$lib/components/sort-select.svelte"
     import Search from "lucide-svelte/icons/search"
     import Smile from "lucide-svelte/icons/smile"
     import Ghost from "lucide-svelte/icons/ghost"
     import Library from "lucide-svelte/icons/library"
     import Shuffle from "lucide-svelte/icons/shuffle"
+    import PanelRight from "lucide-svelte/icons/panel-right"
+    import Pin from "lucide-svelte/icons/pin"
+    import Settings from "lucide-svelte/icons/settings"
+    import SettingsDialog from "$lib/components/settings-dialog.svelte"
+    import { config, settingsDialog } from "$lib/shared/config.svelte"
+    import { toggleAlwaysOnTop, toggleCompactView, windowView } from "$lib/shared/window-view.svelte"
     import Button from "$lib/components/ui/button/button.svelte"
     import ProgressLoading from "$lib/components/progress-loading.svelte"
     import Separator from "$lib/components/ui/separator/separator.svelte"
@@ -27,18 +33,21 @@
         storeCallbacks,
         queryStore,
         fetchAssets,
+        fetchMoreAssets,
+        retryAssets,
+        setSamplePreloadWindow,
         DEFAULT_SORT,
         randomSeed,
     } from "$lib/shared/store.svelte"
     import KeySelect from "$lib/components/key-select.svelte"
     import CollectionsSidebar from "$lib/components/collections-sidebar.svelte"
-    import { viewStore, toggleCollectionTag } from "$lib/shared/view.svelte"
+    import { openBrowse, viewStore, toggleCollectionTag } from "$lib/shared/view.svelte"
     import {
         collectionSamples,
         findCollection,
         removeSample,
     } from "$lib/shared/collections.svelte"
-    import { dawSync } from "$lib/shared/daw-sync.svelte"
+    import { dawSync, toggleDawSyncedPlayback } from "$lib/shared/daw-sync.svelte"
 
     // Single source of truth for the active view. The header, list, empty state
     // and row actions all key off this one derived, so they can never disagree
@@ -58,7 +67,7 @@
 
     // The samples shown in the main list: search results in browse mode,
     // the collection's stored samples (optionally tag-filtered) in collection mode.
-    const shownSamples = $derived.by(() => {
+    const filteredSamples = $derived.by(() => {
         // Splice pagination can return the same sample on more than one page.
         // The results list is keyed by uuid, and a duplicate key throws in
         // Svelte 5 (each_key_duplicate), which breaks rendering of that part of
@@ -84,6 +93,44 @@
             )
         )
     })
+
+    let collectionShuffle = $state<{ uuid: string; ranks: Map<string, number> } | null>(null)
+    const collectionIsShuffled = $derived(
+        !!collectionShuffle && collectionShuffle.uuid === activeCollection?.uuid
+    )
+    const shownSamples = $derived.by(() => {
+        if (!collectionIsShuffled || !collectionShuffle) return filteredSamples
+        const ranks = collectionShuffle.ranks
+        return filteredSamples.toSorted((a, b) =>
+            (ranks.get(a.uuid) ?? Infinity) - (ranks.get(b.uuid) ?? Infinity)
+        )
+    })
+
+    function reshuffle() {
+        if (!activeCollection) {
+            queryStore.random_seed = randomSeed()
+            queryStore.sort = "random"
+            queryStore.order = "DESC"
+            fetchAssets()
+            return
+        }
+
+        const order = shownSamples.map((sample) => sample.uuid)
+        for (let i = order.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1))
+            const sample = order[i]
+            order[i] = order[j]
+            order[j] = sample
+        }
+        if (order.length > 1 && order.every((uuid, i) => uuid === shownSamples[i].uuid)) {
+            order.push(order.shift()!)
+        }
+        collectionShuffle = {
+            uuid: activeCollection.uuid,
+            ranks: new Map(order.map((uuid, index) => [uuid, index])),
+        }
+        viewportRef?.scrollTo({ top: 0 })
+    }
 
     // Aggregated tag counts across the open collection's samples, most common first.
     const collectionTagSummary = $derived.by(() => {
@@ -133,18 +180,10 @@
     //     )
     // )
 
-    $effect(() => {
-        if (
-            queryStore.sort in ["random", "popularity", "relevance", "recency"]
-        ) {
-            queryStore.order = "DESC"
-        }
-    })
-
     storeCallbacks.onbeforedataupdate = () => {
         // The tag drawer/viewport only exist in browse mode; a fetch can resolve
         // while a collection is open, so bail out if they're not mounted.
-        viewportRef?.scrollTo({ top: 0, behavior: "smooth" })
+        if (view.kind === "browse") viewportRef?.scrollTo({ top: 0 })
     }
 
     storeCallbacks.onbeforetagsupdate = () => {
@@ -154,16 +193,55 @@
 
     let expandTags = $state(false)
 
-    let viewportRef = $state<HTMLElement>(null!)
+    let viewportRef = $state<HTMLElement | null>(null)
+    let rowsRef = $state<HTMLDivElement | null>(null)
     let tagsContainerRef = $state<HTMLElement>(null!)
     let tagsDrawerRef = $state<HTMLElement>(null!)
     let searchInputRef = $state<HTMLInputElement>(null!)
 
-    const selectedSampleIndex = $derived(
-        shownSamples.findIndex(
-            (sampleAsset) => sampleAsset.uuid == globalAudio.currentAsset?.uuid
-        )
-    )
+    $effect(() => {
+        const viewport = viewportRef
+        const rows = rowsRef
+        const samples = shownSamples
+        const count = config.preload_samples
+        if (!viewport || !rows || !count || !samples.length) {
+            untrack(() => setSamplePreloadWindow([]))
+            return
+        }
+
+        function preload() {
+            if (rows!.children.length < samples.length) return
+            const top = viewport!.getBoundingClientRect().top
+            let start = 0
+            let end = samples.length
+            // The children are in the same order as the samples, so look up the
+            // first row that still has any part inside the scrolling viewport.
+            while (start < end) {
+                const middle = Math.floor((start + end) / 2)
+                if (rows!.children[middle].getBoundingClientRect().bottom <= top) start = middle + 1
+                else end = middle
+            }
+            setSamplePreloadWindow(samples.slice(start, start + count))
+        }
+
+        let timer: number
+        function schedulePreload() {
+            window.clearTimeout(timer)
+            timer = window.setTimeout(preload, 95)
+        }
+
+        const resize = new ResizeObserver(schedulePreload)
+        resize.observe(viewport)
+        viewport.addEventListener("scroll", schedulePreload, { passive: true })
+        schedulePreload()
+        return () => {
+            window.clearTimeout(timer)
+            resize.disconnect()
+            viewport.removeEventListener("scroll", schedulePreload)
+        }
+    })
+
+    onDestroy(() => setSamplePreloadWindow([]))
 
     const updateSort = (newSort: AssetSortType) => {
         if (viewStore.mode !== "browse") return
@@ -182,7 +260,7 @@
 
     const selectOrPlaySample = (sampleAsset: (typeof shownSamples)[number]) => {
         if (dawSync.connected) {
-            globalAudio.selectSampleAsset(sampleAsset, false)
+            globalAudio.selectSampleAsset(sampleAsset)
             return
         }
 
@@ -226,39 +304,42 @@
     //             Number(dataStore.tags.includes(a.tag.uuid))
     //     )
 
-    onMount(() => {
-        viewportRef.addEventListener("scroll", () => {
+    $effect(() => {
+        const viewport = viewportRef
+        if (!viewport) return
+        const onScroll = () => {
             if (
                 viewStore.mode === "browse" &&
-                !loading.assets &&
-                viewportRef.scrollTop + viewportRef.clientHeight >=
-                    viewportRef.scrollHeight - viewportRef.clientHeight
-            ) {
-                queryStore.page += 1
-                console.log("📃 End of list reached, loading more assets")
-                fetchAssets()
-            }
-        })
+                !loading.fetchError &&
+                viewport.scrollTop + viewport.clientHeight >=
+                    viewport.scrollHeight - viewport.clientHeight
+            ) fetchMoreAssets()
+        }
+        viewport.addEventListener("scroll", onScroll, { passive: true })
+        return () => viewport.removeEventListener("scroll", onScroll)
+    })
 
-        searchInputRef.focus()
-
+    onMount(() => {
+        searchInputRef?.focus()
         fetchAssets()
     })
 </script>
 
 <div class="macos-shell flex size-full min-h-0 flex-col overflow-hidden p-3">
     <div class="glass-panel flex min-h-0 flex-1 overflow-hidden rounded-[26px]">
-        <CollectionsSidebar />
+        {#if !windowView.compact}<CollectionsSidebar />{/if}
         <main class="flex min-h-0 flex-grow flex-col min-w-0">
     <div class="flex flex-shrink-0 flex-col px-5 pt-5 pb-3 gap-4">
-        <div class="flex gap-3 justify-between items-center">
+        <div class="flex gap-2 justify-between items-center">
+            <div class="min-w-0 flex flex-1 items-center gap-2">
             {#if view.kind === "browse"}
                 <SearchInput
                     bind:value={queryStore.query}
                     onsubmit={fetchAssets}
-                    class="max-w-[720px] flex-grow"
+                    class="max-w-[720px] min-w-0 flex-1 shrink"
                     bind:inputRef={searchInputRef}
                 />
+                {#if !windowView.compact}
                 <KeySelect
                     bind:key={queryStore.key}
                     bind:chord_type={queryStore.chord_type}
@@ -274,14 +355,30 @@
                     bind:asset_category_slug={queryStore.asset_category_slug}
                     onselect={fetchAssets}
                 />
+                {/if}
             {:else}
+                {#if windowView.compact}
+                    <Button variant="outline" onclick={openBrowse}>Browse</Button>
+                {/if}
                 <h2 class="flex-grow text-xl font-bold truncate">
                     {activeCollection?.name ?? "Collection"}
                 </h2>
             {/if}
+            </div>
+            {#if windowView.compact}
+                <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"
+                    onclick={() => (settingsDialog.open = true)}><Settings /></Button>
+            {/if}
+            <Button variant={config.always_on_top ? "secondary" : "outline"} size="icon"
+                title="Always on top" aria-label="Always on top" aria-pressed={config.always_on_top}
+                disabled={windowView.changingPin} onclick={toggleAlwaysOnTop}><Pin /></Button>
+            <Button variant={windowView.compact ? "secondary" : "outline"} size="icon"
+                title="Compact view" aria-label="Compact view" aria-pressed={windowView.compact}
+                disabled={windowView.changingSize} onclick={toggleCompactView}><PanelRight /></Button>
         </div>
 
         {#if view.kind === "browse"}
+        {#if !windowView.compact}
         <div
             class="transition-[height] ease-in-out overflow-clip"
             bind:this={tagsDrawerRef}
@@ -352,20 +449,13 @@
             </div>
         </div>
 
+        {/if}
         <div class="flex justify-between items-center gap-2">
             <div class="text-muted-foreground text-sm flex-grow tabular-nums">
                 {dataStore.total_records.toLocaleString()} results
             </div>
-            <Button
-                variant="outline"
-                size="icon"
-                onclick={() => {
-                    queryStore.random_seed = randomSeed()
-                    queryStore.sort = "random"
-                    fetchAssets()
-                }}
-            >
-                <Shuffle />
+            <Button variant="outline" class="gap-2" onclick={reshuffle} aria-label="Reshuffle results">
+                <Shuffle class="size-4" /> Reshuffle
             </Button>
             <SortSelect
                 bind:sort={queryStore.sort}
@@ -375,7 +465,7 @@
         </div>
         {:else}
         <div class="flex flex-col gap-2">
-            {#if collectionTagSummary.length > 0}
+            {#if !windowView.compact && collectionTagSummary.length > 0}
                 <div class="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
                     {#each collectionTagSummary as tag (tag.uuid)}
                         {@const active = viewStore.tagFilter.includes(tag.uuid)}
@@ -388,13 +478,22 @@
                     {/each}
                 </div>
             {/if}
-            <div class="text-muted-foreground text-xs">
-                {shownSamples.length.toLocaleString()} sounds
+            <div class="flex items-center justify-between gap-2">
+                <div class="text-muted-foreground text-xs">{shownSamples.length.toLocaleString()} sounds</div>
+                <div class="flex items-center gap-2">
+                    {#if collectionIsShuffled}
+                        <Button variant="ghost" onclick={() => (collectionShuffle = null)}>Original order</Button>
+                    {/if}
+                    <Button variant="outline" class="gap-2" onclick={reshuffle} disabled={shownSamples.length < 2}>
+                        <Shuffle class="size-4" /> Reshuffle
+                    </Button>
+                </div>
             </div>
         </div>
         {/if}
 
         <div class="glass-panel flex flex-col overflow-hidden rounded-[22px]">
+            {#if !windowView.compact}
             <div
                 class="flex gap-2 items-center justify-between overflow-clip px-6 py-4"
             >
@@ -440,6 +539,7 @@
                     class="flex-shrink-0 w-14 flex-grow"
                 />
             </div>
+            {/if}
             <ProgressLoading
                 loading={loading.assets || loading.waveformsCount > 0}
             />
@@ -468,13 +568,13 @@
                     break
                 case " ":
                     e.preventDefault()
-                    globalAudio.togglePlay()
+                    toggleDawSyncedPlayback()
                     break
             }
         }}
     >
-        <div class="flex flex-col pb-4 size-full">
-            {#each shownSamples as sampleAsset, index (sampleAsset.uuid)}
+        <div bind:this={rowsRef} class="flex flex-col gap-1 pb-4 size-full">
+            {#each shownSamples as sampleAsset (sampleAsset.uuid)}
                 {@const selected =
                     globalAudio.currentAsset?.uuid == sampleAsset.uuid}
                 <SampleListEntry
@@ -495,9 +595,6 @@
                             )
                     }}
                 />
-                {#if index < shownSamples.length - 1}
-                    <div class="h-1"></div>
-                {/if}
             {:else}
                 <div
                     class="flex flex-col gap-2 justify-center items-center size-full text-muted-foreground"
@@ -516,7 +613,7 @@
                         <Ghost size="48" />
                         <p class="font-bold text-xl">Something went wrong :/</p>
                         <p class="text-sm">Couldn't load any samples</p>
-                        <Button onclick={fetchAssets}>Retry</Button>
+                        <Button onclick={retryAssets}>Retry</Button>
                     {:else if emptyStateKind === "welcome"}
                         <Smile size="48" />
                         <p class="font-bold text-xl">Hey there!</p>
@@ -535,7 +632,7 @@
                     <Ghost size="48" />
                     <p class="font-bold text-xl">Something went wrong :/</p>
                     <p class="text-sm">Couldn't load any more samples</p>
-                    <Button onclick={fetchAssets}>Retry</Button>
+                    <Button onclick={retryAssets}>Retry</Button>
                 </div>
             {/if}
         </div>
@@ -543,4 +640,5 @@
         </main>
     </div>
     <AudioPlayer onprev={gotoPrev} onnext={gotoNext} />
+    <SettingsDialog />
 </div>

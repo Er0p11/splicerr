@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { windowView } from "$lib/shared/window-view.svelte"
     import { globalAudio } from "$lib/shared/audio.svelte"
     import PackPreview from "$lib/components/pack-preview.svelte"
     import TagBadge from "$lib/components/tag-badge.svelte"
@@ -105,36 +106,38 @@
     // macOS.
 </script>
 
-<button
+<div
+    role="presentation"
     class={cn(
-        "glass-row flex gap-4 items-center justify-between p-2 rounded-2xl focus:outline-none cursor-grab",
+        "glass-row flex shrink-0 items-center justify-between p-2 rounded-2xl cursor-grab",
+        windowView.compact ? "gap-2" : "gap-4",
         selected && "glass-row-selected",
         className
     )}
     id={`sample-list-entry-${sampleAsset.uuid}`}
     draggable="true"
-    tabindex="-1"
     onmousedown={() => {
-        globalAudio.selectSampleAsset(sampleAsset, false)
+        globalAudio.selectSampleAsset(sampleAsset)
         if (!dawSync.connected) {
             prefetchSampleDrag(sampleAsset)
         }
     }}
     ondragstart={(event) => handleSampleDrag(event, sampleAsset)}
 >
-    <PackPreview {pack} size={11} />
+    {#if !windowView.compact}<PackPreview {pack} size={11} />{/if}
     <Button
         variant="ghost"
         bind:ref={playButtonRef}
         class="group flex-shrink-0 focus:outline-none rounded-full bg-white/[0.06] hover:bg-white/[0.14]"
-        size="icon-lg"
+        size={windowView.compact ? "icon" : "icon-lg"}
+        aria-label={playing ? "Pause preview" : "Play preview"}
         onmousedown={(event) => event.stopPropagation()}
         onclick={() => {
             if (dawSync.connected) {
                 if (selected) {
                     toggleDawSyncedPlayback()
                 } else {
-                    globalAudio.selectSampleAsset(sampleAsset, false)
+                    globalAudio.selectSampleAsset(sampleAsset)
                     setDawSyncedPlaybackEnabled(true)
                 }
                 return
@@ -159,7 +162,7 @@
             {/if}
         {/if}
     </Button>
-    <div class="min-w-32 w-96 flex-[3_1_auto] overflow-clip">
+    <div class={windowView.compact ? "min-w-0 flex-1 overflow-clip" : "min-w-32 w-96 flex-[3_1_auto] overflow-clip"}>
         <div
             class={cn(
                 "text-left relative after:content-[''] after:absolute after:inset-y-0 after:right-0 after:w-6 after:bg-gradient-to-r after:from-transparent after:to-background/0 after:pointer-events-none"
@@ -177,6 +180,7 @@
                     </Tooltip.Content>
                 </Tooltip.Root>
             </Tooltip.Provider>
+            {#if !windowView.compact}
             <div class="flex gap-1 text-xs overflow-clip text-nowrap pt-1">
                 {#each sampleAsset.tags as tag}
                     {@const active = dataStore.tags.includes(tag.uuid)}
@@ -198,6 +202,7 @@
                     />
                 {/each}
             </div>
+            {/if}
         </div>
     </div>
     <Waveform
@@ -205,15 +210,16 @@
         progress={waveformProgress}
         onseek={(progress) => {
             if (dawSync.connected) {
-                globalAudio.selectSampleAsset(sampleAsset, false)
+                globalAudio.selectSampleAsset(sampleAsset)
                 return
             }
 
             const startTime = progress * (sampleAsset.duration / 1000)
             globalAudio.playSampleAsset(sampleAsset, startTime)
         }}
-        class="min-w-40 w-[220px] h-14 flex-grow md:block hidden"
+        class={windowView.compact ? "h-8 w-[22%] shrink-0" : "min-w-40 w-[220px] h-14 flex-grow md:block hidden"}
     />
+    {#if !windowView.compact}
     <div class="text-muted-foreground text-sm tabular-nums flex-shrink-0 w-14 flex-grow">
         {millisToMinutesAndSeconds(sampleAsset.duration)}
     </div>
@@ -222,10 +228,12 @@
             formatKey(sampleAsset.key, sampleAsset.chord_type)) ??
             "--"}
     </div>
-    <div class="text-muted-foreground text-sm tabular-nums flex-shrink-0 w-14 flex-grow">
+    {/if}
+    <div class={cn("text-muted-foreground text-sm tabular-nums shrink-0",
+        windowView.compact ? "w-9 text-right" : "w-14 flex-grow")}>
         {sampleAsset.bpm ?? "--"}
     </div>
-    <!-- svelte-ignore node_invalid_placement_ssr -->
+    {#if !windowView.compact}
     <span
         class="flex-shrink-0 flex items-center gap-0.5"
         onmousedown={(e) => e.stopPropagation()}
@@ -322,4 +330,5 @@
             </Popover.Content>
         </Popover.Root>
     </span>
-</button>
+    {/if}
+</div>

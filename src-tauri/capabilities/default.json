@@ -22,6 +22,10 @@
             ]
         },
         "core:webview:allow-set-webview-zoom",
+        "core:window:allow-set-always-on-top",
+        "core:window:allow-set-size",
+        "core:window:allow-maximize",
+        "core:window:allow-unmaximize",
         "drag:default",
         "fs:default",
         "fs:allow-stat",

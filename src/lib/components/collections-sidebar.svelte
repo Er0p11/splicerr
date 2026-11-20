@@ -6,7 +6,6 @@
     import { ScrollArea } from "$lib/components/ui/scroll-area"
     import * as Popover from "$lib/components/ui/popover"
     import * as Dialog from "$lib/components/ui/dialog"
-    import SettingsDialog from "$lib/components/settings-dialog.svelte"
     import NewCollectionDialog from "$lib/components/new-collection-dialog.svelte"
     import { settingsDialog } from "$lib/shared/config.svelte"
     import Plus from "lucide-svelte/icons/plus"
@@ -258,7 +257,6 @@
 </aside>
 
 <NewCollectionDialog />
-<SettingsDialog />
 
 <Dialog.Root
     open={editTarget !== null}

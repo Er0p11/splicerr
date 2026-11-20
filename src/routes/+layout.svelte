@@ -10,6 +10,7 @@
     } from "$lib/shared/config.svelte"
     import { loadCollections } from "$lib/shared/collections.svelte"
     import { startDawSync, stopDawSync } from "$lib/shared/daw-sync.svelte"
+    import { restoreWindowView } from "$lib/shared/window-view.svelte"
     import Toaster from "$lib/components/toaster.svelte"
     import { onMount } from "svelte"
 
@@ -23,6 +24,7 @@
 
     onMount(() => {
         loadConfig().then(() => {
+            void restoreWindowView()
             if (!isSamplesDirValid()) {
                 settingsDialog.open = true
             }

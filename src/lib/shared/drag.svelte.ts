@@ -1,9 +1,10 @@
 import { startDrag } from "@crabnebula/tauri-plugin-drag"
 import { join, appCacheDir } from "@tauri-apps/api/path"
 import { exists, create, mkdir, readFile } from "@tauri-apps/plugin-fs"
-import { saveDawStretchedSample, saveSample, savePackImage } from "./files.svelte"
-import { semitonesFor } from "./transpose.svelte"
-import { loading } from "./loading.svelte"
+import { saveDawStretchedSample, savePackImage, saveSample, saveTempoAlignedSample } from "./files.svelte"
+import { semitonesFor, transposeSuffix } from "./transpose.svelte"
+import { beginSampleLoad } from "./loading.svelte"
+import { config } from "./config.svelte"
 import type { SampleAsset, PackAsset } from "$lib/splice/types"
 
 async function createDragIcon(
@@ -62,11 +63,17 @@ async function createInvisibleIcon(): Promise<string> {
 async function resizeImageToCorner(
     imageBuffer: ArrayBuffer
 ): Promise<Uint8Array> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         const blob = new Blob([imageBuffer])
         const img = new Image()
+        const url = URL.createObjectURL(blob)
         const iconSize = 64
+        img.onerror = () => {
+            URL.revokeObjectURL(url)
+            reject(new Error("Could not decode pack artwork"))
+        }
         img.onload = () => {
+            URL.revokeObjectURL(url)
             const canvasWidth = iconSize * 2
             const canvasHeight = iconSize * 2.5
             const canvas = document.createElement("canvas")
@@ -85,12 +92,14 @@ async function resizeImageToCorner(
             ctx.drawImage(img, x, y, iconSize, iconSize)
 
             canvas.toBlob((blob) => {
-                blob!.arrayBuffer().then((buffer) => {
-                    resolve(new Uint8Array(buffer))
-                })
+                if (!blob) {
+                    reject(new Error("Could not encode drag icon"))
+                    return
+                }
+                blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject)
             }, "image/png")
         }
-        img.src = URL.createObjectURL(blob)
+        img.src = url
     })
 }
 
@@ -102,15 +111,22 @@ type DragData = { path: string; iconPath: string }
 const dragCache = new Map<string, DragData>()
 const inFlight = new Map<string, Promise<DragData | null>>()
 
-const cacheKey = (s: SampleAsset) => `${s.uuid}:${semitonesFor(s)}`
-const dawCacheKey = (s: SampleAsset, bpm: number) =>
-    `${cacheKey(s)}:daw-full:${Math.round(bpm)}`
+export type DragTempo = { source: "bridge" | "manual"; bpm: number }
+
+function cacheKey(sample: SampleAsset, tempo?: DragTempo) {
+    const variant = tempo ? `${tempo.source}:${tempo.bpm}` : "original"
+    return `${config.samples_dir}:${sample.uuid}:${transposeSuffix(semitonesFor(sample))}:${variant}`
+}
 
 async function dragIconForSample(sampleAsset: SampleAsset) {
-    const pack = sampleAsset.parents.items[0] as PackAsset
-    const packImagePath = await savePackImage(sampleAsset)
-    if (packImagePath && (await exists(packImagePath))) {
-        return await createDragIcon(packImagePath, pack.uuid)
+    try {
+        const pack = sampleAsset.parents.items[0] as PackAsset
+        const packImagePath = await savePackImage(sampleAsset)
+        if (packImagePath && (await exists(packImagePath))) {
+            return await createDragIcon(packImagePath, pack.uuid)
+        }
+    } catch (error) {
+        console.debug("Could not use pack artwork for the drag icon", error)
     }
     return await createInvisibleIcon()
 }
@@ -121,101 +137,46 @@ async function dragIconForSample(sampleAsset: SampleAsset) {
  * files already exist on disk. Call this ahead of the drag gesture (on hover /
  * pointerdown) so `handleSampleDrag` has everything ready synchronously.
  */
-export function prefetchSampleDrag(sampleAsset: SampleAsset): Promise<DragData | null> {
-    const key = cacheKey(sampleAsset)
+export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo) {
+    const key = cacheKey(sampleAsset, tempo)
     const cached = dragCache.get(key)
     if (cached) return Promise.resolve(cached)
     const existing = inFlight.get(key)
     if (existing) return existing
 
-    const p = (async () => {
-        loading.samples.add(sampleAsset.uuid)
-        loading.samplesCount++
+    const pending = (async () => {
+        const finishLoad = beginSampleLoad(sampleAsset.uuid)
         try {
-            const path = await saveSample(sampleAsset)
-            const iconPath = await dragIconForSample(sampleAsset)
-
-            const data = { path, iconPath }
-            dragCache.set(key, data)
-            return data
-        } catch (e) {
-            console.error("⚠️ Failed preparing sample for drag", e)
-            return null
-        } finally {
-            loading.samples.delete(sampleAsset.uuid)
-            loading.samplesCount--
-            inFlight.delete(key)
-        }
-    })()
-    inFlight.set(key, p)
-    return p
-}
-
-export function prefetchDawSampleDrag(
-    sampleAsset: SampleAsset,
-    dawBpm: number
-): Promise<DragData | null> {
-    const key = dawCacheKey(sampleAsset, dawBpm)
-    const cached = dragCache.get(key)
-    if (cached) return Promise.resolve(cached)
-    const existing = inFlight.get(key)
-    if (existing) return existing
-
-    const p = (async () => {
-        loading.samples.add(sampleAsset.uuid)
-        loading.samplesCount++
-        try {
-            const path = await saveDawStretchedSample(sampleAsset, dawBpm)
+            const path = tempo?.source === "bridge"
+                ? await saveDawStretchedSample(sampleAsset, tempo.bpm)
+                : tempo
+                  ? await saveTempoAlignedSample(sampleAsset, tempo.bpm)
+                  : await saveSample(sampleAsset)
             const iconPath = await dragIconForSample(sampleAsset)
             const data = { path, iconPath }
             dragCache.set(key, data)
             return data
-        } catch (e) {
-            console.error("⚠️ Failed preparing DAW-stretched sample for drag", e)
+        } catch (error) {
+            console.error("Failed preparing WAV for drag", error)
             return null
         } finally {
-            loading.samples.delete(sampleAsset.uuid)
-            loading.samplesCount--
+            finishLoad()
             inFlight.delete(key)
         }
     })()
-    inFlight.set(key, p)
-    return p
+    inFlight.set(key, pending)
+    return pending
 }
 
-/**
- * dragstart handler. MUST stay synchronous: on macOS the native drag session
- * snapshots `NSApp.currentEvent`, so any `await` before `startDrag` leaves it
- * stale/nil and crashes AppKit (EXC_BAD_ACCESS in NSViewAlignRect). We therefore
- * only start the drag when the files are already prepared; otherwise we kick off
- * the prefetch so the next gesture works.
- */
-export function handleSampleDrag(event: DragEvent, sampleAsset: SampleAsset) {
+/** The macOS native drag must start while the current drag event is still active. */
+export function handleSampleDrag(event: DragEvent, sampleAsset: SampleAsset, tempo?: DragTempo) {
     event.preventDefault()
-    const data = dragCache.get(cacheKey(sampleAsset))
+    const data = dragCache.get(cacheKey(sampleAsset, tempo))
     if (data) {
-        startDrag({ item: [data.path], icon: data.iconPath })
-    } else {
-        console.log("🫳 Preparing", sampleAsset.name, "— drag again once ready")
-        prefetchSampleDrag(sampleAsset)
-    }
-}
-
-export function handleDawSampleDrag(
-    event: DragEvent,
-    sampleAsset: SampleAsset,
-    dawBpm: number
-) {
-    event.preventDefault()
-    const data = dragCache.get(dawCacheKey(sampleAsset, dawBpm))
-    if (data) {
-        startDrag({ item: [data.path], icon: data.iconPath })
-    } else {
-        console.log(
-            "🫳 Preparing DAW-stretched sample",
-            sampleAsset.name,
-            "— drag again once ready"
+        void startDrag({ item: [data.path], icon: data.iconPath }).catch((error) =>
+            console.error("Could not start sample drag", error)
         )
-        prefetchDawSampleDrag(sampleAsset, dawBpm)
+    } else {
+        void prefetchSampleDrag(sampleAsset, tempo)
     }
 }
