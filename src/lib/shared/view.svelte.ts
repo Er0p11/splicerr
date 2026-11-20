@@ -1,10 +1,14 @@
 import { refreshCollectionUrls } from "./collections.svelte"
+import type { PackAsset } from "$lib/splice/types"
+import { setPackScope } from "./store.svelte"
+import { loadPacks } from "./packs.svelte"
 
-export type ViewMode = "browse" | "collection"
+export type ViewMode = "browse" | "packs" | "collection"
 
 export const viewStore = $state({
     mode: "browse" as ViewMode,
     collectionUuid: null as string | null,
+    pack: null as PackAsset | null,
     // Tag uuids used to filter the currently open collection (client-side).
     tagFilter: [] as string[],
 })
@@ -22,6 +26,21 @@ export function openBrowse() {
     viewStore.mode = "browse"
     viewStore.collectionUuid = null
     viewStore.tagFilter = []
+    viewStore.pack = null
+    setPackScope(null)
+}
+
+export function openPacks() {
+    viewStore.mode = "packs"
+    loadPacks()
+}
+
+export function openPack(pack: PackAsset) {
+    viewStore.mode = "browse"
+    viewStore.collectionUuid = null
+    viewStore.tagFilter = []
+    viewStore.pack = pack
+    setPackScope(pack.uuid)
 }
 
 /** Toggle a tag in the active collection's filter. */

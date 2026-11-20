@@ -1,7 +1,8 @@
 <script lang="ts">
     import { windowView } from "$lib/shared/window-view.svelte"
     import { globalAudio } from "$lib/shared/audio.svelte"
-    import PackPreview from "$lib/components/pack-preview.svelte"
+    import PackMenu from "$lib/components/pack-menu.svelte"
+    import PackArtwork from "$lib/components/pack-artwork.svelte"
     import TagBadge from "$lib/components/tag-badge.svelte"
     import Waveform from "$lib/components/waveform.svelte"
     import type { SampleAsset } from "$lib/splice/types"
@@ -12,11 +13,11 @@
     import { buttonVariants } from "$lib/components/ui/button/index.js"
     import * as Tooltip from "$lib/components/ui/tooltip/index.js"
     import LoaderCircle from "lucide-svelte/icons/loader-circle"
-    import { dataStore, fetchAssets } from "$lib/shared/store.svelte"
+    import { dataStore, fetchAssets, queryStore } from "$lib/shared/store.svelte"
     import { cn, formatKey } from "$lib/utils"
-    import { loading } from "$lib/shared/loading.svelte"
+    import { loading, sampleDownloads } from "$lib/shared/loading.svelte"
     import { assetIcons } from "$lib/shared/icons.svelte"
-    import { handleSampleDrag, prefetchSampleDrag } from "$lib/shared/drag.svelte"
+    import { handleSampleDrag, manualDragTempo } from "$lib/shared/drag.svelte"
     import {
         dawSync,
         setDawSyncedPlaybackEnabled,
@@ -80,7 +81,8 @@
     })
 
     const pack = $derived(sampleAsset.parents.items[0])
-    const name = $derived(sampleAsset.name.split("/").slice(-1))
+    const name = $derived(sampleAsset.name.split("/").at(-1) ?? sampleAsset.name)
+    const downloadProgress = $derived(sampleDownloads.get(sampleAsset.uuid))
     const waveformProgress = $derived.by(() => {
         if (!selected) return 0
 
@@ -101,30 +103,43 @@
         return minutes + ":" + (seconds < 10 ? "0" : "") + seconds
     }
 
-    // Prepare the sample for dragging on press (not hover) so the native drag can
-    // start synchronously — doing the descramble/write inside dragstart crashes on
-    // macOS.
+    const isRowSurface = (event: MouseEvent) =>
+        event.target instanceof Element && !event.target.closest("button,a,input,[role=button]")
+
+    function playFromStart() {
+        if (dawSync.connected) {
+            globalAudio.selectSampleAsset(sampleAsset)
+            setDawSyncedPlaybackEnabled(true)
+        } else {
+            void globalAudio.playSampleAsset(sampleAsset)
+        }
+    }
 </script>
 
 <div
     role="presentation"
     class={cn(
-        "glass-row flex shrink-0 items-center justify-between p-2 rounded-2xl cursor-grab",
+        "glass-row flex shrink-0 items-center justify-between p-2 rounded-2xl cursor-pointer",
         windowView.compact ? "gap-2" : "gap-4",
         selected && "glass-row-selected",
         className
     )}
     id={`sample-list-entry-${sampleAsset.uuid}`}
     draggable="true"
-    onmousedown={() => {
-        globalAudio.selectSampleAsset(sampleAsset)
-        if (!dawSync.connected) {
-            prefetchSampleDrag(sampleAsset)
-        }
+    onclick={(event) => {
+        if (isRowSurface(event)) playFromStart()
     }}
-    ondragstart={(event) => handleSampleDrag(event, sampleAsset)}
+    ondragstart={(event) => {
+        if (isRowSurface(event)) {
+            handleSampleDrag(event, sampleAsset, dawSync.connected ? undefined : manualDragTempo(sampleAsset))
+        } else event.preventDefault()
+    }}
 >
-    {#if !windowView.compact}<PackPreview {pack} size={11} />{/if}
+    {#if pack}
+        <PackMenu {pack} thumbnail size={windowView.compact ? 7 : 11} {downloadProgress} />
+    {:else if !windowView.compact || downloadProgress !== undefined}
+        <PackArtwork size={windowView.compact ? 7 : 11} {downloadProgress} />
+    {/if}
     <Button
         variant="ghost"
         bind:ref={playButtonRef}
@@ -170,17 +185,19 @@
         >
             <Tooltip.Provider>
                 <Tooltip.Root>
-                    <Tooltip.Trigger
-                        class="overflow-clip text-nowrap cursor-grab text-[15px] font-medium text-foreground"
-                    >
-                        {name}
+                    <Tooltip.Trigger>
+                        {#snippet child({ props })}
+                            <span {...props} class="overflow-clip text-nowrap text-[15px] font-medium text-foreground">
+                                {name}
+                            </span>
+                        {/snippet}
                     </Tooltip.Trigger>
                     <Tooltip.Content>
                         {name}
                     </Tooltip.Content>
                 </Tooltip.Root>
             </Tooltip.Provider>
-            {#if !windowView.compact}
+            {#if !windowView.compact && !queryStore.pack_uuid}
             <div class="flex gap-1 text-xs overflow-clip text-nowrap pt-1">
                 {#each sampleAsset.tags as tag}
                     {@const active = dataStore.tags.includes(tag.uuid)}

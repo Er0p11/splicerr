@@ -9,7 +9,7 @@
     import type { MouseEventHandler } from "svelte/elements"
     import LoaderCircle from "lucide-svelte/icons/loader-circle"
     import { loading } from "$lib/shared/loading.svelte"
-    import PackPreview from "$lib/components/pack-preview.svelte"
+    import PackMenu from "$lib/components/pack-menu.svelte"
     import * as Tooltip from "$lib/components/ui/tooltip"
     import { dataStore, fetchAssets } from "$lib/shared/store.svelte"
     import TagBadge from "$lib/components/tag-badge.svelte"
@@ -150,7 +150,7 @@
         </div>
         {#if globalAudio.currentAsset && !windowView.compact}
             <div class="flex gap-2 items-center flex-1 min-w-0">
-                <PackPreview side="top" pack={currentPack} />
+                {#if currentPack}<PackMenu side="top" pack={currentPack} thumbnail />{/if}
                 <div class="text-muted-foreground">
                     {#if globalAudio.currentAsset.asset_category_slug in assetIcons}
                         {@const Icon =
@@ -231,7 +231,7 @@
                 </Tooltip.Root>
             </Tooltip.Provider>
             <TempoControls asset={globalAudio.currentAsset} />
-            {#if !windowView.compact}<TransposeDialog />{/if}
+            {#if dawSync.connected}<TransposeDialog />{/if}
             <Button
                 variant="ghost"
                 size={windowView.compact ? "icon" : "icon-lg"}

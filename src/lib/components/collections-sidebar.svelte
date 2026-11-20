@@ -6,11 +6,12 @@
     import { ScrollArea } from "$lib/components/ui/scroll-area"
     import * as Popover from "$lib/components/ui/popover"
     import * as Dialog from "$lib/components/ui/dialog"
-    import NewCollectionDialog from "$lib/components/new-collection-dialog.svelte"
+    import SplicerrMark from "$lib/components/splicerr-mark.svelte"
     import { settingsDialog } from "$lib/shared/config.svelte"
     import Plus from "lucide-svelte/icons/plus"
     import Search from "lucide-svelte/icons/search"
     import Library from "lucide-svelte/icons/library"
+    import Package from "lucide-svelte/icons/package"
     import Settings from "lucide-svelte/icons/settings"
     import Heart from "lucide-svelte/icons/heart"
     import Ellipsis from "lucide-svelte/icons/ellipsis"
@@ -32,7 +33,7 @@
     } from "$lib/shared/export.svelte"
     import { toast } from "$lib/shared/toasts.svelte"
     import { revealItemInDir } from "@tauri-apps/plugin-opener"
-    import { openBrowse, openCollection, viewStore } from "$lib/shared/view.svelte"
+    import { openBrowse, openCollection, openPacks, viewStore } from "$lib/shared/view.svelte"
 
     // Collection being edited in the Edit dialog, if any
     let editTarget = $state<{ uuid: string; name: string } | null>(null)
@@ -98,11 +99,7 @@
     class="flex flex-col w-60 flex-shrink-0 h-full p-4 gap-4 border-r border-white/10 bg-white/[0.025]"
 >
     <div class="flex items-center gap-3 px-2 py-1.5">
-        <div
-            class="flex size-9 items-center justify-center rounded-xl bg-white/[0.12] text-sm font-semibold shadow-inner"
-        >
-            S
-        </div>
+        <SplicerrMark />
         <div class="min-w-0">
             <div class="truncate text-[15px] font-semibold leading-tight">
                 Splicerr
@@ -120,13 +117,22 @@
         <button
             class={cn(
                 "flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-left w-full text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground",
-                viewStore.mode === "browse" &&
+                viewStore.mode === "browse" && !viewStore.pack &&
                     "bg-white/[0.12] text-foreground shadow-inner"
             )}
             onclick={openBrowse}
         >
             <Search size="16" class="flex-shrink-0" />
             Browse
+        </button>
+        <button
+            class={cn(
+                "flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground",
+                viewStore.mode === "packs" && "bg-white/[0.12] text-foreground shadow-inner"
+            )}
+            onclick={openPacks}
+        >
+            <Package size="16" class="shrink-0" /> Packs
         </button>
     </div>
 
@@ -167,7 +173,7 @@
                             <span
                                 class="text-xs text-muted-foreground flex-shrink-0"
                             >
-                                {likesCollection()?.sample_uuids.length}
+                                {(likesCollection()?.sample_uuids.length ?? 0) + (likesCollection()?.packs?.length ?? 0)}
                             </span>
                         </button>
                         <!-- Spacer matching the menu button so counts align -->
@@ -200,7 +206,7 @@
                             {#if exportState.busy.has(collection.uuid)}
                                 <LoaderCircle size="12" class="animate-spin" />
                             {/if}
-                            {collection.sample_uuids.length}
+                            {collection.sample_uuids.length + (collection.packs?.length ?? 0)}
                         </span>
                     </button>
                     <Popover.Root>
@@ -256,7 +262,6 @@
     </div>
 </aside>
 
-<NewCollectionDialog />
 
 <Dialog.Root
     open={editTarget !== null}

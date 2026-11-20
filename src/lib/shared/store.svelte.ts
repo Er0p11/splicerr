@@ -12,7 +12,7 @@ import type {
     TagSummaryEntry,
 } from "$lib/splice/types"
 import { globalAudio } from "./audio.svelte"
-import { beginSampleLoad, loading } from "./loading.svelte"
+import { beginSampleLoad, loading, trackSampleDownload } from "./loading.svelte"
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
 import { semitonesFor } from "./transpose.svelte"
 import { decodeAudioFromURL } from "./wav"
@@ -54,6 +54,7 @@ export const chord_types = ["major", "minor"]
 
 export const queryStore = $state({
     query: "",
+    pack_uuid: null as string | null,
     sort: DEFAULT_SORT as AssetSortType,
     random_seed: randomSeed(),
     order: "DESC" as SortOrder,
@@ -69,17 +70,18 @@ export const queryStore = $state({
 // The query identity is the part of the query that uniquely identifies the returned data
 // It is used to determine if the fetched data should replace the current data, be appended to it, or be ignored
 const queryIdentity = $derived({
-    query: queryStore.query,
+    parent_asset_uuid: queryStore.pack_uuid,
+    query: queryStore.pack_uuid ? null : queryStore.query,
     sort: queryStore.sort,
     order: queryStore.order,
     random_seed: queryStore.random_seed,
-    tags: dataStore.tags,
-    asset_category_slug: queryStore.asset_category_slug,
-    bpm: queryStore.bpm?.toString(),
-    min_bpm: queryStore.min_bpm,
-    max_bpm: queryStore.max_bpm,
-    key: queryStore.key,
-    chord_type: queryStore.chord_type,
+    tags: queryStore.pack_uuid ? [] : dataStore.tags,
+    asset_category_slug: queryStore.pack_uuid ? null : queryStore.asset_category_slug,
+    bpm: queryStore.pack_uuid ? null : queryStore.bpm?.toString(),
+    min_bpm: queryStore.pack_uuid ? null : queryStore.min_bpm,
+    max_bpm: queryStore.pack_uuid ? null : queryStore.max_bpm,
+    key: queryStore.pack_uuid ? null : queryStore.key,
+    chord_type: queryStore.pack_uuid ? null : queryStore.chord_type,
 })
 
 export const storeCallbacks = $state({
@@ -196,6 +198,16 @@ export const fetchAssets = () => requestAssets(false)
 export const fetchMoreAssets = () => requestAssets(true)
 export const retryAssets = () => requestAssets(retryMore && currentQueryIdentity === JSON.stringify(queryIdentity))
 
+export function setPackScope(packUuid: string | null) {
+    if (queryStore.pack_uuid === packUuid) return
+    queryStore.pack_uuid = packUuid
+    dataStore.sampleAssets = []
+    dataStore.total_records = 0
+    dataStore.tag_summary = []
+    loading.fetchError = null
+    fetchAssets()
+}
+
 export function setSamplePreloadWindow(samples: SampleAsset[]) {
     preloadWindow = new Map(samples.map((sample) => [sample.uuid, sample]))
     attemptedPreloads = new Set([...attemptedPreloads].filter((uuid) => preloadWindow.has(uuid)))
@@ -251,20 +263,60 @@ export async function getDescrambledSampleBytes(sampleAsset: SampleAsset, signal
 }
 
 async function downloadSampleBytes(sampleAsset: SampleAsset, signal?: AbortSignal) {
-    signal?.throwIfAborted()
-    let response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
-    // Collection URLs can expire between visits. Refresh and retry once.
-    if (!response.ok && await refreshSampleUrl(sampleAsset)) {
+    const transfer = trackSampleDownload(sampleAsset.uuid)
+    try {
         signal?.throwIfAborted()
-        response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
+        let response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
+        // Collection URLs can expire between visits. Refresh and retry once.
+        if (!response.ok && await refreshSampleUrl(sampleAsset)) {
+            signal?.throwIfAborted()
+            response = await fetchBinaryResponse(sampleAsset.files[0].url, signal)
+        }
+        if (!response.ok) {
+            throw new Error(`Sample fetch failed (${response.status} ${response.statusText})`)
+        }
+
+        const data = await readPreviewResponse(response, transfer.update)
+        signal?.throwIfAborted()
+        return descrambleSample(data)
+    } finally {
+        transfer.finish()
     }
-    if (!response.ok) {
-        throw new Error(`Sample fetch failed (${response.status} ${response.statusText})`)
+}
+
+async function readPreviewResponse(response: Response, update: (progress: number) => void) {
+    const size = Number(response.headers.get("content-length"))
+    if (!response.body || !Number.isSafeInteger(size) || size <= 0) {
+        return new Uint8Array(await response.arrayBuffer())
     }
 
-    const data = new Uint8Array(await response.arrayBuffer())
-    signal?.throwIfAborted()
-    return descrambleSample(data)
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let received = 0
+    let percent = 0
+    update(0)
+    try {
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value)
+            received += value.byteLength
+            const next = Math.min(100, Math.floor(received / size * 100))
+            if (next > percent) {
+                percent = next
+                update(percent / 100)
+            }
+        }
+    } finally {
+        reader.releaseLock()
+    }
+    const data = new Uint8Array(received)
+    let offset = 0
+    for (const chunk of chunks) {
+        data.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return data
 }
 
 /**

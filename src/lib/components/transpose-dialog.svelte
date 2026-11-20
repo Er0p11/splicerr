@@ -18,6 +18,7 @@
     } from "$lib/shared/daw-sync.svelte"
 
     const PITCH_RANGE = 12
+    let { embedded = false }: { embedded?: boolean } = $props()
 
     const t = $derived(config.transpose)
     const notes = $derived(t.spelling === "flat" ? FLAT_NOTES : SHARP_NOTES)
@@ -93,27 +94,10 @@
     }
 </script>
 
-<Popover.Root>
-    <Popover.Trigger>
-        {#snippet child({ props })}
-            <Button
-                variant="ghost"
-                size="icon-lg"
-                class={cn("shrink-0 gap-1", t.enabled && "text-primary")}
-                title="Transpose"
-                {...props}
-            >
-                <Music2 />
-                {#if activeLabel}
-                    <span class="text-xs font-semibold">{activeLabel}</span>
-                {/if}
-            </Button>
-        {/snippet}
-    </Popover.Trigger>
-    <Popover.Content side="top" align="end" class="w-72 p-4">
+{#snippet transposeSettings()}
         <div class="flex items-center justify-between">
             <span class="text-base font-semibold">Transpose</span>
-            <Switch checked={t.enabled} onCheckedChange={setEnabled} />
+            <Switch aria-label="Enable transpose" checked={t.enabled} onCheckedChange={setEnabled} />
         </div>
 
         <div
@@ -196,5 +180,29 @@
                 {/if}
             </p>
         </div>
-    </Popover.Content>
-</Popover.Root>
+{/snippet}
+
+{#if embedded}
+    {@render transposeSettings()}
+{:else}
+    <Popover.Root>
+        <Popover.Trigger>
+            {#snippet child({ props })}
+                <Button
+                    variant="ghost" size="icon-lg"
+                    class={cn("shrink-0 gap-1", t.enabled && "text-primary")}
+                    title="Transpose" aria-label="Transpose"
+                    {...props}
+                >
+                    <Music2 />
+                    {#if activeLabel}
+                        <span class="text-xs font-semibold">{activeLabel}</span>
+                    {/if}
+                </Button>
+            {/snippet}
+        </Popover.Trigger>
+        <Popover.Content side="top" align="end" class="w-72 p-4">
+            {@render transposeSettings()}
+        </Popover.Content>
+    </Popover.Root>
+{/if}

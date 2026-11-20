@@ -4,7 +4,10 @@ import { exists, create, mkdir, readFile } from "@tauri-apps/plugin-fs"
 import { saveDawStretchedSample, savePackImage, saveSample, saveTempoAlignedSample } from "./files.svelte"
 import { semitonesFor, transposeSuffix } from "./transpose.svelte"
 import { beginSampleLoad } from "./loading.svelte"
-import { config } from "./config.svelte"
+import { config, isSamplesDirValid, settingsDialog } from "./config.svelte"
+import { SvelteMap } from "svelte/reactivity"
+import { manualTempoRatio } from "./tempo"
+import { toast } from "./toasts.svelte"
 import type { SampleAsset, PackAsset } from "$lib/splice/types"
 
 async function createDragIcon(
@@ -108,14 +111,24 @@ type DragData = { path: string; iconPath: string }
 // Cache the on-disk WAV + drag icon per sample (keyed by uuid + transpose, since
 // the saved path depends on the transpose suffix), so that the actual drag can be
 // started synchronously.
-const dragCache = new Map<string, DragData>()
+const dragCache = new SvelteMap<string, DragData>()
 const inFlight = new Map<string, Promise<DragData | null>>()
 
 export type DragTempo = { source: "bridge" | "manual"; bpm: number }
 
-function cacheKey(sample: SampleAsset, tempo?: DragTempo) {
+export function sampleDragKey(sample: SampleAsset, tempo?: DragTempo) {
     const variant = tempo ? `${tempo.source}:${tempo.bpm}` : "original"
-    return `${config.samples_dir}:${sample.uuid}:${transposeSuffix(semitonesFor(sample))}:${variant}`
+    const semitones = semitonesFor(sample)
+    return `${config.samples_dir}:${sample.uuid}:${semitones}:${transposeSuffix(semitones)}:${variant}`
+}
+
+export function manualDragTempo(sample: SampleAsset | null): DragTempo | undefined {
+    const bpm = config.manual_bpm
+    if (bpm && manualTempoRatio(sample, bpm) !== null) return { source: "manual", bpm }
+}
+
+export function isSampleDragReady(sample: SampleAsset, tempo?: DragTempo) {
+    return dragCache.has(sampleDragKey(sample, tempo))
 }
 
 async function dragIconForSample(sampleAsset: SampleAsset) {
@@ -137,15 +150,15 @@ async function dragIconForSample(sampleAsset: SampleAsset) {
  * files already exist on disk. Call this ahead of the drag gesture (on hover /
  * pointerdown) so `handleSampleDrag` has everything ready synchronously.
  */
-export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo) {
-    const key = cacheKey(sampleAsset, tempo)
+export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo, background = false) {
+    const key = sampleDragKey(sampleAsset, tempo)
     const cached = dragCache.get(key)
     if (cached) return Promise.resolve(cached)
     const existing = inFlight.get(key)
     if (existing) return existing
 
     const pending = (async () => {
-        const finishLoad = beginSampleLoad(sampleAsset.uuid)
+        const finishLoad = background ? null : beginSampleLoad(sampleAsset.uuid)
         try {
             const path = tempo?.source === "bridge"
                 ? await saveDawStretchedSample(sampleAsset, tempo.bpm)
@@ -160,7 +173,7 @@ export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo) 
             console.error("Failed preparing WAV for drag", error)
             return null
         } finally {
-            finishLoad()
+            finishLoad?.()
             inFlight.delete(key)
         }
     })()
@@ -171,12 +184,50 @@ export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo) 
 /** The macOS native drag must start while the current drag event is still active. */
 export function handleSampleDrag(event: DragEvent, sampleAsset: SampleAsset, tempo?: DragTempo) {
     event.preventDefault()
-    const data = dragCache.get(cacheKey(sampleAsset, tempo))
+    if (!isSamplesDirValid()) {
+        settingsDialog.open = true
+        return
+    }
+    const data = dragCache.get(sampleDragKey(sampleAsset, tempo))
     if (data) {
         void startDrag({ item: [data.path], icon: data.iconPath }).catch((error) =>
             console.error("Could not start sample drag", error)
         )
     } else {
-        void prefetchSampleDrag(sampleAsset, tempo)
+        const pending = inFlight.has(sampleDragKey(sampleAsset, tempo))
+        if (pending) {
+            toast({ title: "WAV is preparing", description: "Drag again when it is ready.", duration: 2500 })
+        } else {
+            void prefetchSampleDrag(sampleAsset, tempo).then((ready) => {
+                if (ready) toast({ title: "WAV ready to drag", duration: 2500 })
+            })
+        }
+    }
+}
+
+// Drop queued rows on scroll or settings changes. Let the single in-flight
+// render finish so it can be reused when the sample returns to the viewport.
+let alignedQueue: { sample: SampleAsset; tempo: DragTempo; key: string }[] = []
+let renderingAligned = false
+
+export function setAlignedDragWindow(samples: SampleAsset[]) {
+    alignedQueue = samples.flatMap((sample) => {
+        const tempo = manualDragTempo(sample)
+        return tempo ? [{ sample, tempo, key: sampleDragKey(sample, tempo) }] : []
+    })
+    queueMicrotask(() => void prepareNextAlignedSample())
+}
+
+async function prepareNextAlignedSample() {
+    if (renderingAligned) return
+    renderingAligned = true
+    try {
+        while (alignedQueue.length) {
+            const { sample, tempo, key } = alignedQueue.shift()!
+            if (sampleDragKey(sample, manualDragTempo(sample)) !== key) continue
+            if (!isSampleDragReady(sample, tempo)) await prefetchSampleDrag(sample, tempo, true)
+        }
+    } finally {
+        renderingAligned = false
     }
 }

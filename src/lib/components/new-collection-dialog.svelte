@@ -7,6 +7,7 @@
         addSample,
         createCollection,
         newCollectionDialog,
+        setPackInCollection,
     } from "$lib/shared/collections.svelte"
     import { openCollection } from "$lib/shared/view.svelte"
     import { toast } from "$lib/shared/toasts.svelte"
@@ -21,16 +22,19 @@
     const create = () => {
         if (!name.trim()) return
         const collection = createCollection(name)
-        const sample = newCollectionDialog.pendingSample
-        if (sample) {
-            // Created from a sample row: add it and stay where we are.
-            addSample(collection.uuid, sample)
+        const asset = newCollectionDialog.pendingAsset
+        if (asset) {
+            if ("parents" in asset) addSample(collection.uuid, asset)
+            else void setPackInCollection(collection.uuid, asset, true).catch((error) => {
+                console.error("Could not save pack", error)
+                toast({ title: "Could not save pack", variant: "error" })
+            })
         } else {
             // Created from the sidebar: jump into the new collection.
             openCollection(collection.uuid)
         }
         newCollectionDialog.open = false
-        newCollectionDialog.pendingSample = null
+        newCollectionDialog.pendingAsset = null
         toast({
             title: "Collection created",
             description: collection.name,
@@ -43,7 +47,7 @@
     open={newCollectionDialog.open}
     onOpenChange={(open) => {
         newCollectionDialog.open = open
-        if (!open) newCollectionDialog.pendingSample = null
+        if (!open) newCollectionDialog.pendingAsset = null
     }}
 >
     <Dialog.Content>

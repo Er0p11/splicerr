@@ -5,16 +5,17 @@
     import { buttonVariants } from "$lib/components/ui/button"
     import Input from "$lib/components/ui/input/input.svelte"
     import * as Popover from "$lib/components/ui/popover"
+    import TransposeDialog from "$lib/components/transpose-dialog.svelte"
     import type { SampleAsset } from "$lib/splice/types"
     import {
         config, isSamplesDirValid, MAX_MANUAL_BPM, MIN_MANUAL_BPM,
         normalizeManualBpm, saveConfig, settingsDialog,
     } from "$lib/shared/config.svelte"
     import { dawSync } from "$lib/shared/daw-sync.svelte"
-    import { handleSampleDrag, prefetchSampleDrag, type DragTempo } from "$lib/shared/drag.svelte"
-    import { manualTempoRatio } from "$lib/shared/tempo"
+    import {
+        handleSampleDrag, isSampleDragReady, manualDragTempo, prefetchSampleDrag, sampleDragKey, type DragTempo,
+    } from "$lib/shared/drag.svelte"
     import { toast } from "$lib/shared/toasts.svelte"
-    import { semitonesFor, transposeSuffix } from "$lib/shared/transpose.svelte"
 
     let { asset }: { asset: SampleAsset | null } = $props()
     let open = $state(false)
@@ -22,14 +23,15 @@
     const bridgeBpm = $derived(Math.round((dawSync.bpm ?? 0) * 100) / 100)
     const tempo = $derived.by((): DragTempo | null => {
         if (dawSync.connected) return bridgeBpm ? { source: "bridge", bpm: bridgeBpm } : null
-        if (!config.manual_bpm || manualTempoRatio(asset, config.manual_bpm) === null) return null
-        return { source: "manual", bpm: config.manual_bpm }
+        return manualDragTempo(asset) ?? null
     })
-    const preparationKey = $derived(asset && tempo
-        ? `${config.samples_dir}:${asset.uuid}:${tempo.source}:${tempo.bpm}:${transposeSuffix(semitonesFor(asset))}`
-        : null)
+    const preparationKey = $derived(asset && tempo ? sampleDragKey(asset, tempo) : null)
     let preparation = $state<{ key: string; status: "loading" | "ready" | "failed" } | null>(null)
-    const status = $derived(preparation?.key === preparationKey ? preparation?.status : null)
+    const status = $derived.by(() => {
+        if (!asset || !tempo || !isSamplesDirValid()) return null
+        if (isSampleDragReady(asset, tempo)) return "ready"
+        return preparation?.key === preparationKey ? preparation.status : null
+    })
 
     async function prepare() {
         if (!asset || !tempo || !preparationKey || !isSamplesDirValid()) return
@@ -62,7 +64,7 @@
         >
             {config.manual_bpm ? `Align · ${config.manual_bpm} BPM` : "Align BPM"}
         </Popover.Trigger>
-        <Popover.Content align="end" side="top" class="w-64">
+        <Popover.Content align="end" side="top" class="w-72 max-h-[80vh] overflow-y-auto">
             <form class="flex flex-col gap-3" onsubmit={(event) => {
                 event.preventDefault()
                 const bpm = normalizeManualBpm(draftBpm)
@@ -83,6 +85,26 @@
                     <Button type="submit">Apply BPM</Button>
                 </div>
             </form>
+            <label class="mt-3 flex items-start gap-2 text-sm">
+                <input class="mt-0.5" type="checkbox" checked={config.prepare_aligned_wavs}
+                    onchange={(event) => {
+                        config.prepare_aligned_wavs = event.currentTarget.checked
+                        void saveConfig().catch((error) => {
+                            console.error("Could not save WAV setting", error)
+                            toast({ title: "Could not save WAV setting", variant: "error" })
+                        })
+                    }} />
+                <span>
+                    <span class="block font-medium">Pre-render aligned WAVs</span>
+                    <span class="block text-xs text-muted-foreground">
+                        Prepare the selected and buffered samples for drag to DAW. Saves WAVs in Samples Directory.
+                    </span>
+                </span>
+            </label>
+            <details class="mt-3 border-t border-border pt-3">
+                <summary class="cursor-pointer text-sm font-medium">Transpose settings</summary>
+                <div class="mt-3"><TransposeDialog embedded /></div>
+            </details>
         </Popover.Content>
     </Popover.Root>
 {/if}

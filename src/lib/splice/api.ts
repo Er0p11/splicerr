@@ -85,8 +85,7 @@ export async function querySplice(
     template: QueryTemplate,
     variables: typeof template.variables = {}
 ) {
-    const body = { ...template }
-    Object.assign(body.variables, variables)
+    const body = { ...template, variables: { ...template.variables, ...variables } }
     const startTime = Date.now()
     console.log("💌 Requesting", body)
     try {

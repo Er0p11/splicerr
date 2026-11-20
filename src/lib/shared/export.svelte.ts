@@ -1,8 +1,9 @@
 import { zipSync, type Zippable } from "fflate"
 import { save } from "@tauri-apps/plugin-dialog"
 import { writeFile } from "@tauri-apps/plugin-fs"
-import { findCollection, refreshCollectionUrls, collectionSamples } from "./collections.svelte"
+import { findCollection, refreshCollectionUrls, collectionSamples, collectionPacks } from "./collections.svelte"
 import { encodeSampleWav } from "./files.svelte"
+import { fetchAllPackSamples } from "$lib/splice/packs"
 
 const sanitizeFileName = (name: string) =>
     name.replace(/[^a-zA-Z0-9#_\-. ]/g, "_").trim() || "collection"
@@ -25,8 +26,8 @@ export async function exportCollectionToZip(
     const collection = findCollection(colUuid)
     if (!collection) return null
 
-    const samples = collectionSamples(colUuid)
-    if (samples.length === 0) {
+    const packs = collectionPacks(colUuid)
+    if (collection.sample_uuids.length === 0 && packs.length === 0) {
         throw new Error("Collection is empty")
     }
 
@@ -41,8 +42,12 @@ export async function exportCollectionToZip(
     try {
         await refreshCollectionUrls(colUuid)
 
+        const samples = new Map(collectionSamples(colUuid).map((sample) => [sample.uuid, sample]))
+        for (const pack of packs) {
+            for (const sample of await fetchAllPackSamples(pack.uuid)) samples.set(sample.uuid, sample)
+        }
         const entries: Zippable = {}
-        for (const sample of samples) {
+        for (const sample of samples.values()) {
             try {
                 const wav = await encodeSampleWav(sample, 0)
                 // Flat archive: just the file name (last path segment), forced to

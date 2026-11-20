@@ -13,7 +13,11 @@
     import Pin from "lucide-svelte/icons/pin"
     import Settings from "lucide-svelte/icons/settings"
     import SettingsDialog from "$lib/components/settings-dialog.svelte"
-    import { config, settingsDialog } from "$lib/shared/config.svelte"
+    import NewCollectionDialog from "$lib/components/new-collection-dialog.svelte"
+    import PackListEntry from "$lib/components/pack-list-entry.svelte"
+    import PackMenu from "$lib/components/pack-menu.svelte"
+    import Package from "lucide-svelte/icons/package"
+    import { config, isSamplesDirValid, settingsDialog } from "$lib/shared/config.svelte"
     import { toggleAlwaysOnTop, toggleCompactView, windowView } from "$lib/shared/window-view.svelte"
     import Button from "$lib/components/ui/button/button.svelte"
     import ProgressLoading from "$lib/components/progress-loading.svelte"
@@ -26,7 +30,7 @@
     import AudioPlayer from "$lib/components/audio-player.svelte"
     import TagBadge from "$lib/components/tag-badge.svelte"
     import { globalAudio } from "$lib/shared/audio.svelte"
-    import type { AssetSortType } from "$lib/splice/types"
+    import type { AssetSortType, SampleAsset } from "$lib/splice/types"
     import { loading } from "$lib/shared/loading.svelte"
     import {
         dataStore,
@@ -41,19 +45,23 @@
     } from "$lib/shared/store.svelte"
     import KeySelect from "$lib/components/key-select.svelte"
     import CollectionsSidebar from "$lib/components/collections-sidebar.svelte"
-    import { openBrowse, viewStore, toggleCollectionTag } from "$lib/shared/view.svelte"
+    import { openBrowse, openPacks, viewStore, toggleCollectionTag } from "$lib/shared/view.svelte"
     import {
         collectionSamples,
+        collectionPacks,
         findCollection,
         removeSample,
     } from "$lib/shared/collections.svelte"
     import { dawSync, toggleDawSyncedPlayback } from "$lib/shared/daw-sync.svelte"
+    import { packsStore, retryPacks, searchPacks } from "$lib/shared/packs.svelte"
+    import { setAlignedDragWindow } from "$lib/shared/drag.svelte"
 
     // Single source of truth for the active view. The header, list, empty state
     // and row actions all key off this one derived, so they can never disagree
     // mid-switch (which used to flash "Empty collection" over Browse). Falls back
     // to browse if the active collection was deleted.
     const view = $derived.by(() => {
+        if (viewStore.mode === "packs") return { kind: "packs" as const }
         if (viewStore.mode === "collection" && viewStore.collectionUuid) {
             const collection = findCollection(viewStore.collectionUuid)
             if (collection) return { kind: "collection" as const, collection }
@@ -64,10 +72,14 @@
     const activeCollection = $derived(
         view.kind === "collection" ? view.collection : null
     )
+    const activePack = $derived(view.kind === "browse" ? viewStore.pack : null)
+    const savedPacks = $derived(activeCollection ? collectionPacks(activeCollection.uuid) : [])
+    const viewKey = $derived(activePack?.uuid ?? activeCollection?.uuid ?? view.kind)
 
     // The samples shown in the main list: search results in browse mode,
     // the collection's stored samples (optionally tag-filtered) in collection mode.
     const filteredSamples = $derived.by(() => {
+        if (view.kind === "packs") return []
         // Splice pagination can return the same sample on more than one page.
         // The results list is keyed by uuid, and a duplicate key throws in
         // Svelte 5 (each_key_duplicate), which breaks rendering of that part of
@@ -156,7 +168,7 @@
     // Which empty-state to show, derived from the same source as the list so the
     // message can never disagree with what's actually rendered.
     const emptyStateKind = $derived.by(() => {
-        if (shownSamples.length > 0) return null
+        if (shownSamples.length > 0 || savedPacks.length > 0 || loading.assets) return null
         if (view.kind === "collection") {
             return viewStore.tagFilter.length > 0
                 ? "no-tag-match"
@@ -195,6 +207,7 @@
 
     let viewportRef = $state<HTMLElement | null>(null)
     let rowsRef = $state<HTMLDivElement | null>(null)
+    let bufferWindow = $state.raw<SampleAsset[]>([])
     let tagsContainerRef = $state<HTMLElement>(null!)
     let tagsDrawerRef = $state<HTMLElement>(null!)
     let searchInputRef = $state<HTMLInputElement>(null!)
@@ -205,23 +218,28 @@
         const samples = shownSamples
         const count = config.preload_samples
         if (!viewport || !rows || !count || !samples.length) {
-            untrack(() => setSamplePreloadWindow([]))
+            bufferWindow = []
             return
         }
 
         function preload() {
             if (rows!.children.length < samples.length) return
-            const top = viewport!.getBoundingClientRect().top
+            const bounds = viewport!.getBoundingClientRect()
             let start = 0
             let end = samples.length
             // The children are in the same order as the samples, so look up the
             // first row that still has any part inside the scrolling viewport.
             while (start < end) {
                 const middle = Math.floor((start + end) / 2)
-                if (rows!.children[middle].getBoundingClientRect().bottom <= top) start = middle + 1
+                if (rows!.children[middle].getBoundingClientRect().bottom <= bounds.top) start = middle + 1
                 else end = middle
             }
-            setSamplePreloadWindow(samples.slice(start, start + count))
+            const first = rows!.children[start]
+            const next = first && first.getBoundingClientRect().top < bounds.bottom
+                ? samples.slice(start, start + count)
+                : []
+            if (next.length !== bufferWindow.length ||
+                next.some((sample, index) => sample !== bufferWindow[index])) bufferWindow = next
         }
 
         let timer: number
@@ -241,7 +259,28 @@
         }
     })
 
-    onDestroy(() => setSamplePreloadWindow([]))
+    $effect(() => {
+        const samples = bufferWindow
+        untrack(() => setSamplePreloadWindow(samples))
+    })
+
+    $effect(() => {
+        if (!config.prepare_aligned_wavs || !config.manual_bpm || dawSync.connected || !isSamplesDirValid()) {
+            setAlignedDragWindow([])
+            return
+        }
+        const selected = globalAudio.currentAsset
+        setAlignedDragWindow(selected ? [selected, ...bufferWindow.filter((sample) => sample.uuid !== selected.uuid)] : bufferWindow)
+    })
+
+    $effect(() => {
+        if (viewKey) viewportRef?.scrollTo({ top: 0 })
+    })
+
+    onDestroy(() => {
+        setSamplePreloadWindow([])
+        setAlignedDragWindow([])
+    })
 
     const updateSort = (newSort: AssetSortType) => {
         if (viewStore.mode !== "browse") return
@@ -308,12 +347,10 @@
         const viewport = viewportRef
         if (!viewport) return
         const onScroll = () => {
-            if (
-                viewStore.mode === "browse" &&
-                !loading.fetchError &&
-                viewport.scrollTop + viewport.clientHeight >=
-                    viewport.scrollHeight - viewport.clientHeight
-            ) fetchMoreAssets()
+            const nearEnd = viewport.scrollTop + 2 * viewport.clientHeight >= viewport.scrollHeight
+            if (!nearEnd) return
+            if (viewStore.mode === "browse" && !loading.fetchError) fetchMoreAssets()
+            else if (viewStore.mode === "packs" && !packsStore.error) void searchPacks(true)
         }
         viewport.addEventListener("scroll", onScroll, { passive: true })
         return () => viewport.removeEventListener("scroll", onScroll)
@@ -332,7 +369,15 @@
     <div class="flex flex-shrink-0 flex-col px-5 pt-5 pb-3 gap-4">
         <div class="flex gap-2 justify-between items-center">
             <div class="min-w-0 flex flex-1 items-center gap-2">
-            {#if view.kind === "browse"}
+            {#if view.kind === "packs"}
+                <SearchInput bind:value={packsStore.query} onsubmit={() => void searchPacks()}
+                    placeholder="Search packs…" autocomplete={false} class="max-w-[720px] min-w-0 flex-1 shrink" />
+                <Button variant="outline" onclick={openBrowse}>Samples</Button>
+            {:else if activePack}
+                <Button variant="outline" onclick={openPacks}>Packs</Button>
+                <h2 class="min-w-0 flex-1 truncate text-xl font-bold">{activePack.name}</h2>
+                <PackMenu pack={activePack} side="bottom" />
+            {:else if view.kind === "browse"}
                 <SearchInput
                     bind:value={queryStore.query}
                     onsubmit={fetchAssets}
@@ -377,8 +422,13 @@
                 disabled={windowView.changingSize} onclick={toggleCompactView}><PanelRight /></Button>
         </div>
 
-        {#if view.kind === "browse"}
-        {#if !windowView.compact}
+        {#if view.kind === "packs"}
+            <div class="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+                <span>{packsStore.total.toLocaleString()} packs</span>
+            </div>
+            <ProgressLoading loading={packsStore.loading} />
+        {:else if view.kind === "browse"}
+        {#if !windowView.compact && !activePack}
         <div
             class="transition-[height] ease-in-out overflow-clip"
             bind:this={tagsDrawerRef}
@@ -454,6 +504,11 @@
             <div class="text-muted-foreground text-sm flex-grow tabular-nums">
                 {dataStore.total_records.toLocaleString()} results
             </div>
+            {#if windowView.compact && !activePack}
+                <Button variant="outline" size="icon" onclick={openPacks} aria-label="Packs" title="Packs">
+                    <Package class="size-4" />
+                </Button>
+            {/if}
             <Button variant="outline" class="gap-2" onclick={reshuffle} aria-label="Reshuffle results">
                 <Shuffle class="size-4" /> Reshuffle
             </Button>
@@ -479,7 +534,10 @@
                 </div>
             {/if}
             <div class="flex items-center justify-between gap-2">
-                <div class="text-muted-foreground text-xs">{shownSamples.length.toLocaleString()} sounds</div>
+                <div class="text-muted-foreground text-xs">
+                    {shownSamples.length.toLocaleString()} sounds
+                    {#if savedPacks.length} · {savedPacks.length.toLocaleString()} packs{/if}
+                </div>
                 <div class="flex items-center gap-2">
                     {#if collectionIsShuffled}
                         <Button variant="ghost" onclick={() => (collectionShuffle = null)}>Original order</Button>
@@ -492,6 +550,7 @@
         </div>
         {/if}
 
+        {#if view.kind !== "packs"}
         <div class="glass-panel flex flex-col overflow-hidden rounded-[22px]">
             {#if !windowView.compact}
             <div
@@ -544,11 +603,13 @@
                 loading={loading.assets || loading.waveformsCount > 0}
             />
         </div>
+        {/if}
     </div>
     <ScrollArea
         class="px-5 min-h-0 flex-1 before:content-[''] before:absolute before:inset-x-0 before:top-0 before:h-6 before:bg-gradient-to-t before:from-transparent before:to-background/80 before:pointer-events-none after:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:h-6 after:bg-gradient-to-b after:from-transparent after:to-background/80 after:pointer-events-none"
         bind:viewportRef
         onkeydown={(e) => {
+            if (view.kind === "packs" || (e.target instanceof Element && e.target.closest("[data-pack-row]"))) return
             switch (e.key) {
                 case "ArrowUp":
                     e.preventDefault()
@@ -573,7 +634,26 @@
             }
         }}
     >
-        <div bind:this={rowsRef} class="flex flex-col gap-1 pb-4 size-full">
+        {#if view.kind === "packs"}
+            <div class="flex flex-col gap-1 pb-4">
+                {#each packsStore.items as pack (pack.uuid)}
+                    <PackListEntry {pack} />
+                {/each}
+                {#if packsStore.error}
+                    <div class="flex flex-col items-center gap-3 py-8 text-muted-foreground">
+                        <p>Couldn't load packs.</p>
+                        <Button onclick={retryPacks}>Retry</Button>
+                    </div>
+                {:else if !packsStore.loading && packsStore.items.length === 0}
+                    <p class="py-8 text-center text-muted-foreground">No packs found.</p>
+                {/if}
+            </div>
+        {:else}
+        <div class="flex flex-col gap-1 pb-4 size-full">
+            {#each savedPacks as pack (pack.uuid)}
+                <PackListEntry {pack} collectionUuid={activeCollection?.uuid} />
+            {/each}
+            <div bind:this={rowsRef} class="flex flex-col gap-1 grow">
             {#each shownSamples as sampleAsset (sampleAsset.uuid)}
                 {@const selected =
                     globalAudio.currentAsset?.uuid == sampleAsset.uuid}
@@ -596,6 +676,7 @@
                     }}
                 />
             {:else}
+                {#if emptyStateKind}
                 <div
                     class="flex flex-col gap-2 justify-center items-center size-full text-muted-foreground"
                 >
@@ -607,7 +688,7 @@
                         <Library size="48" />
                         <p class="font-bold text-xl">Empty collection</p>
                         <p class="text-sm">
-                            Add sounds from Browse using the menu on each row.
+                            Add sounds or packs using the menu on each row.
                         </p>
                     {:else if emptyStateKind === "error"}
                         <Ghost size="48" />
@@ -624,7 +705,9 @@
                         <p class="text-sm">Try different keywords</p>
                     {/if}
                 </div>
+                {/if}
             {/each}
+            </div>
             {#if view.kind === "browse" && loading.fetchError && dataStore.sampleAssets.length > 0}
                 <div
                     class="flex flex-col py-8 gap-2 justify-center items-center text-muted-foreground"
@@ -636,9 +719,11 @@
                 </div>
             {/if}
         </div>
+        {/if}
     </ScrollArea>
         </main>
     </div>
     <AudioPlayer onprev={gotoPrev} onnext={gotoNext} />
     <SettingsDialog />
+    <NewCollectionDialog />
 </div>

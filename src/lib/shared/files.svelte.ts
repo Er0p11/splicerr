@@ -1,6 +1,6 @@
 import type { SampleAsset } from "$lib/splice/types"
-import { join, sep } from "@tauri-apps/api/path"
-import { exists, create, mkdir } from "@tauri-apps/plugin-fs"
+import { dirname, join } from "@tauri-apps/api/path"
+import { exists, create, mkdir, rename, remove } from "@tauri-apps/plugin-fs"
 import {
     getDescrambledSampleBytes,
     getDescrambledSampleURL,
@@ -28,7 +28,12 @@ type EncodeOptions = {
     signal?: AbortSignal
 }
 
-const sanitizePath = (path: string) => path.replace(/[^a-zA-Z0-9#_\-\.\/]/g, "_")
+export function safePathPart(part: string) {
+    const name = part.replace(/[^a-zA-Z0-9#_.-]/g, "_").replace(/\.+$/, "") || "_"
+    return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name) ? `_${name}` : name
+}
+
+const sanitizePath = (path: string) => path.split("/").filter(Boolean).map(safePathPart).join("/")
 
 // Insert a suffix (e.g. transpose tag) right before the file extension.
 const withSuffix = (name: string, suffix: string, forceWav: boolean) => {
@@ -46,16 +51,7 @@ const sampleAssetPath = (sampleAsset: SampleAsset, suffix: string, forceWav: boo
     )
 
 async function ensureFileDirectoryExists(filePath: string) {
-    const separator = sep()
-    const dirs = filePath.split(separator).slice(0, -1) // Remove the filename
-    let currentPath = ""
-
-    for (const dir of dirs) {
-        currentPath += dir + separator
-        if (!(await exists(currentPath))) {
-            await mkdir(currentPath, { recursive: true })
-        }
-    }
+    await mkdir(await dirname(filePath), { recursive: true })
 }
 
 function nextFrame() {
@@ -67,18 +63,24 @@ function nextFrame() {
 async function writeFileChunked(filePath: string, data: Uint8Array) {
     await ensureFileDirectoryExists(filePath)
 
-    const file = await create(filePath)
+    const temporaryPath = `${filePath}.${crypto.randomUUID()}.part`
+    const file = await create(temporaryPath)
     const chunkSize = 1024 * 1024
 
     try {
-        for (let offset = 0; offset < data.byteLength;) {
-            const written = await file.write(data.subarray(offset, offset + chunkSize))
-            if (!written) throw new Error("Could not write WAV data")
-            offset += written
-            await nextFrame()
+        try {
+            for (let offset = 0; offset < data.byteLength;) {
+                const written = await file.write(data.subarray(offset, offset + chunkSize))
+                if (!written) throw new Error("Could not write WAV data")
+                offset += written
+                await nextFrame()
+            }
+        } finally {
+            await file.close()
         }
+        if (!(await exists(filePath))) await rename(temporaryPath, filePath)
     } finally {
-        await file.close()
+        if (await exists(temporaryPath)) await remove(temporaryPath)
     }
 }
 
@@ -294,6 +296,14 @@ export async function saveTempoAlignedSample(sampleAsset: SampleAsset, bpm: numb
         await writeFileChunked(path, wav)
     }
     return path
+}
+
+export function originalWavPath(sample: SampleAsset, suffix = "") {
+    return sanitizePath(withSuffix(sample.name, suffix, true))
+}
+
+export async function saveOriginalWav(sample: SampleAsset, path: string) {
+    if (!(await exists(path))) await writeFileChunked(path, await encodeSampleWav(sample, 0))
 }
 
 export async function absolutePackImagePath(sampleAsset: SampleAsset) {

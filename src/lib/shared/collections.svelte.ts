@@ -8,6 +8,7 @@ import {
 } from "@tauri-apps/plugin-fs"
 import { appConfigDir } from "@tauri-apps/api/path"
 import type {
+    PackAsset,
     SampleAsset,
     SamplesSearchResponse,
 } from "$lib/splice/types"
@@ -29,6 +30,7 @@ export type Collection = {
     // are Splice signed CDN links that expire, so they are refreshed on demand
     // (see refreshCollectionUrls in store/api wiring) rather than trusted long-term.
     samples: Record<string, SampleAsset>
+    packs?: PackAsset[]
 }
 
 export const collectionsStore = $state({
@@ -36,15 +38,14 @@ export const collectionsStore = $state({
     loaded: false,
 })
 
-// Shared state for the "New collection" modal. When pendingSample is set, the
-// sample is added to the collection right after it's created.
+// An asset supplied by a row is added as soon as the new collection is created.
 export const newCollectionDialog = $state({
     open: false,
-    pendingSample: null as SampleAsset | null,
+    pendingAsset: null as SampleAsset | PackAsset | null,
 })
 
-export function openNewCollectionDialog(sample: SampleAsset | null = null) {
-    newCollectionDialog.pendingSample = sample
+export function openNewCollectionDialog(asset: SampleAsset | PackAsset | null = null) {
+    newCollectionDialog.pendingAsset = asset
     newCollectionDialog.open = true
 }
 
@@ -63,6 +64,21 @@ export const userCollections = () =>
 
 export const isLiked = (sampleUuid: string) =>
     isSampleInCollection(LIKES_UUID, sampleUuid)
+
+export const collectionPacks = (colUuid: string) => findCollection(colUuid)?.packs ?? []
+
+export const isPackInCollection = (colUuid: string, packUuid: string) =>
+    collectionPacks(colUuid).some((pack) => pack.uuid === packUuid)
+
+export function setPackInCollection(colUuid: string, pack: PackAsset, included: boolean) {
+    const collection = findCollection(colUuid)
+    if (!collection) return Promise.resolve()
+    const packs = collectionPacks(colUuid)
+    collection.packs = included
+        ? [...packs.filter((other) => other.uuid !== pack.uuid), $state.snapshot(pack) as PackAsset]
+        : packs.filter((other) => other.uuid !== pack.uuid)
+    return saveCollections()
+}
 
 export function toggleLike(asset: SampleAsset) {
     if (isLiked(asset.uuid)) {
@@ -109,9 +125,17 @@ export async function loadCollections() {
     collectionsStore.loaded = true
 }
 
-export async function saveCollections() {
+let pendingSave = Promise.resolve()
+
+export function saveCollections() {
+    const save = pendingSave.then(writeCollections)
+    pendingSave = save.catch(() => {})
+    return save
+}
+
+async function writeCollections() {
     const appConfig = await appConfigDir()
-    if (!(await exists(appConfig))) await mkdir(appConfig)
+    if (!(await exists(appConfig))) await mkdir(appConfig, { recursive: true })
 
     if (
         !(await exists(COLLECTIONS_FILE_NAME, {

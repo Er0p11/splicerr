@@ -1,7 +1,7 @@
-export type SamplesSearchResponse = {
+export type AssetSearchResponse<T> = {
     data: {
         assetsSearch: {
-            items: Array<SampleAsset>
+            items: T[]
             __typename: string
             tag_summary: Array<TagSummaryEntry>
             pagination_metadata: {
@@ -16,6 +16,8 @@ export type SamplesSearchResponse = {
         }
     }
 }
+
+export type SamplesSearchResponse = AssetSearchResponse<SampleAsset>
 
 export type AssetPrice = {
     amount: number

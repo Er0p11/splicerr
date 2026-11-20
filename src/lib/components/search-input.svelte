@@ -14,11 +14,15 @@
         onsubmit,
         class: className,
         inputRef = $bindable(null!),
+        placeholder = "Search samples, packs, genres...",
+        autocomplete = true,
     }: {
         value: string
         onsubmit: () => void
         class?: string
         inputRef?: HTMLInputElement
+        placeholder?: string
+        autocomplete?: boolean
     } = $props()
 
     let lastSubmittedValue: string
@@ -60,7 +64,7 @@
         <input
             bind:value
             bind:this={inputRef}
-            placeholder="Search samples, packs, genres..."
+            {placeholder}
             onfocus={() => (open = true)}
             onblur={() => (open = false)}
             onkeydown={(event) => {
@@ -103,8 +107,11 @@
                 if (value !== lastSubmittedValue) {
                     debounce(submit)
                 }
-                querySplice(SoundsSearchAutocomplete, { term: value }).then(
+                if (!autocomplete) return
+                const term = value
+                querySplice(SoundsSearchAutocomplete, { term }).then(
                     (response) => {
+                        if (term !== value || !response) return
                         suggestions = (
                             response as SoundsSearchAutocompleteResponse
                         ).data.soundsSearchSuggestions.results

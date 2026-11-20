@@ -688,7 +688,11 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            start_daw_sync_listener(app.handle().clone())?;
+            // Standalone browsing and playback can coexist with another instance
+            // that already owns the DAW Bridge port.
+            if let Err(error) = start_daw_sync_listener(app.handle().clone()) {
+                eprintln!("{error}");
+            }
 
             // Hidden webview parked on the Splice GraphQL host. Navigating here
             // (a 400 JSON page) makes Cloudflare hand out a `__cf_bm` cookie for

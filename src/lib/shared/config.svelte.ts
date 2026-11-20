@@ -58,6 +58,7 @@ const DEFAULT_CONFIG = {
     repeat_audio: true,
     preload_samples: 12,
     manual_bpm: null as number | null,
+    prepare_aligned_wavs: false,
     always_on_top: false,
     compact_view: false,
     expanded_width: 800,

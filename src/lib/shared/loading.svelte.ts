@@ -1,3 +1,5 @@
+import { SvelteMap } from "svelte/reactivity"
+
 export const loading = $state({
     assets: false,
     waveformsCount: 0,
@@ -13,6 +15,36 @@ export const loading = $state({
         }
     },
 })
+
+// undefined = idle, null = transfer with no known size, number = proportion.
+export const sampleDownloads = new SvelteMap<string, number | null>()
+const activeDownloads = new Map<string, Map<symbol, number | null>>()
+
+export function trackSampleDownload(uuid: string) {
+    const key = Symbol()
+    const transfers = activeDownloads.get(uuid) ?? new Map()
+    activeDownloads.set(uuid, transfers)
+    const update = (progress: number | null) => {
+        transfers.set(key, progress)
+        const known = [...transfers.values()].filter((value): value is number => value !== null)
+        sampleDownloads.set(uuid, known.length ? Math.max(...known) : null)
+    }
+    update(null)
+
+    return {
+        update,
+        finish() {
+            transfers.delete(key)
+            if (transfers.size === 0) {
+                activeDownloads.delete(uuid)
+                sampleDownloads.delete(uuid)
+            } else {
+                const known = [...transfers.values()].filter((value): value is number => value !== null)
+                sampleDownloads.set(uuid, known.length ? Math.max(...known) : null)
+            }
+        },
+    }
+}
 
 const sampleLoadCounts = new Map<string, number>()
 
