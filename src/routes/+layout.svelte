@@ -11,7 +11,6 @@
     import { loadCollections } from "$lib/shared/collections.svelte"
     import { startDawSync, stopDawSync } from "$lib/shared/daw-sync.svelte"
     import { restoreWindowView } from "$lib/shared/window-view.svelte"
-    import Toaster from "$lib/components/toaster.svelte"
     import { onMount } from "svelte"
 
     let { children } = $props()
@@ -37,4 +36,3 @@
 
 <ModeWatcher />
 {@render children?.()}
-<Toaster />

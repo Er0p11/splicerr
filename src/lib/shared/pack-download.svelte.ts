@@ -1,14 +1,13 @@
 import { open } from "@tauri-apps/plugin-dialog"
 import { join } from "@tauri-apps/api/path"
-import { revealItemInDir } from "@tauri-apps/plugin-opener"
 import { SvelteMap } from "svelte/reactivity"
 import { fetchAllPackSamples } from "$lib/splice/packs"
 import type { PackAsset } from "$lib/splice/types"
 import { config, isSamplesDirValid, settingsDialog } from "./config.svelte"
 import { originalWavPath, safePathPart, saveOriginalWav } from "./files.svelte"
-import { toast } from "./toasts.svelte"
 
 export const packDownloads = new SvelteMap<string, { done: number; total: number }>()
+export const packDownloadResults = new SvelteMap<string, { summary: string; directory?: string }>()
 
 export async function downloadPack(pack: PackAsset, chooseFolder: boolean) {
     if (packDownloads.has(pack.uuid)) return
@@ -23,40 +22,48 @@ export async function downloadPack(pack: PackAsset, chooseFolder: boolean) {
             ? await open({ directory: true, multiple: false, title: "Choose a folder for the pack" })
             : config.samples_dir
         if (!parent) return
+        packDownloadResults.delete(pack.uuid)
 
         const directory = await join(parent, safePathPart(pack.name))
         const samples = await fetchAllPackSamples(pack.uuid)
         if (!samples.length) throw new Error("This pack has no downloadable sample previews.")
 
         const usedPaths = new Set<string>()
+        let done = 0
         let failed = 0
-        for (const [index, sample] of samples.entries()) {
-            packDownloads.set(pack.uuid, { done: index, total: samples.length })
+        const files = samples.map((sample) => {
             let relative = originalWavPath(sample)
             for (let copy = 2; usedPaths.has(relative.toLowerCase()); copy++) {
                 relative = originalWavPath(sample, `_${copy}`)
             }
             usedPaths.add(relative.toLowerCase())
-            try {
-                await saveOriginalWav(sample, await join(directory, relative))
-            } catch (error) {
-                failed++
-                console.error("Could not save pack sample", sample.uuid, error)
-            }
+            return { sample, relative }
+        })
+        packDownloads.set(pack.uuid, { done, total: files.length })
+        for (let start = 0; start < files.length;) {
+            const batch = files.slice(start, start + config.parallel_sample_downloads)
+            await Promise.all(batch.map(async ({ sample, relative }) => {
+                try {
+                    await saveOriginalWav(sample, await join(directory, relative))
+                } catch (error) {
+                    failed++
+                    console.error("Could not save pack sample", sample.uuid, error)
+                } finally {
+                    packDownloads.set(pack.uuid, { done: ++done, total: files.length })
+                }
+            }))
+            start += batch.length
         }
 
         if (failed === samples.length) throw new Error("Could not save any sample files.")
-        toast({
-            title: failed ? "Pack download partially completed" : "Pack downloaded",
-            description: `${samples.length - failed} of ${samples.length} WAVs · ${pack.name}`,
-            variant: failed ? "default" : "success",
-            onClick: () => revealItemInDir(directory),
+        packDownloadResults.set(pack.uuid, {
+            summary: failed ? `${samples.length - failed} of ${samples.length} WAVs saved` : `${samples.length} WAVs saved`,
+            directory,
         })
     } catch (error) {
-        toast({
-            title: "Pack download failed",
-            description: error instanceof Error ? error.message : String(error),
-            variant: "error",
+        console.error("Could not download pack", pack.uuid, error)
+        packDownloadResults.set(pack.uuid, {
+            summary: error instanceof Error ? error.message : "Pack download failed.",
         })
     } finally {
         packDownloads.delete(pack.uuid)

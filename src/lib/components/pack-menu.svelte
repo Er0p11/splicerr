@@ -10,16 +10,15 @@
     import ListPlus from "lucide-svelte/icons/list-plus"
     import Plus from "lucide-svelte/icons/plus"
     import Trash2 from "lucide-svelte/icons/trash-2"
-    import { openUrl } from "@tauri-apps/plugin-opener"
+    import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener"
     import * as Popover from "$lib/components/ui/popover"
     import PackArtwork from "./pack-artwork.svelte"
     import type { PackAsset } from "$lib/splice/types"
     import {
         LIKES_UUID, isPackInCollection, openNewCollectionDialog, setPackInCollection, userCollections,
     } from "$lib/shared/collections.svelte"
-    import { downloadPack, packDownloads } from "$lib/shared/pack-download.svelte"
+    import { downloadPack, packDownloadResults, packDownloads } from "$lib/shared/pack-download.svelte"
     import { openPack } from "$lib/shared/view.svelte"
-    import { toast } from "$lib/shared/toasts.svelte"
 
     let {
         pack, thumbnail = false, size = 12, side = "right", downloadProgress, collectionUuid = null,
@@ -36,12 +35,12 @@
     let choosingCollection = $state(false)
     const favorite = $derived(isPackInCollection(LIKES_UUID, pack.uuid))
     const download = $derived(packDownloads.get(pack.uuid))
+    const downloadResult = $derived(packDownloadResults.get(pack.uuid))
     const itemClass = "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-50"
 
     function setSaved(uuid: string, included: boolean) {
         void setPackInCollection(uuid, pack, included).catch((error) => {
             console.error("Could not save pack", error)
-            toast({ title: "Could not save pack", variant: "error" })
         })
     }
 
@@ -111,6 +110,17 @@
             <button class={itemClass} disabled={!!download} onclick={() => startDownload(true)}>
                 <FolderOpen class="size-4" /> Download pack to…
             </button>
+            {#if !download && downloadResult}
+                {@const directory = downloadResult.directory}
+                {#if directory}
+                    <button class={itemClass} onclick={() => {
+                        open = false
+                        void revealItemInDir(directory).catch((error) => console.error("Could not show pack folder", error))
+                    }}><FolderOpen class="size-4" /> Show download folder</button>
+                {:else}
+                    <p class="px-2 py-1 text-xs text-muted-foreground">{downloadResult.summary}</p>
+                {/if}
+            {/if}
             {#if pack.permalink_base_url && pack.permalink_slug}
                 <button class={itemClass} onclick={() => {
                     open = false

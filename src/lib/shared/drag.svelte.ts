@@ -1,118 +1,16 @@
 import { startDrag } from "@crabnebula/tauri-plugin-drag"
-import { join, appCacheDir } from "@tauri-apps/api/path"
-import { exists, create, mkdir, readFile } from "@tauri-apps/plugin-fs"
-import { saveDawStretchedSample, savePackImage, saveSample, saveTempoAlignedSample } from "./files.svelte"
-import { semitonesFor, transposeSuffix } from "./transpose.svelte"
-import { beginSampleLoad } from "./loading.svelte"
-import { config, isSamplesDirValid, settingsDialog } from "./config.svelte"
 import { SvelteMap } from "svelte/reactivity"
+import dragIcon from "../../../src-tauri/icons/32x32.png?inline"
+import type { SampleAsset } from "$lib/splice/types"
+import { config, isSamplesDirValid, settingsDialog } from "./config.svelte"
+import { saveDawStretchedSample, saveSample, saveTempoAlignedSample } from "./files.svelte"
+import { beginSampleLoad } from "./loading.svelte"
 import { manualTempoRatio } from "./tempo"
-import { toast } from "./toasts.svelte"
-import type { SampleAsset, PackAsset } from "$lib/splice/types"
+import { prioritizeSampleDownload } from "./store.svelte"
+import { semitonesFor, transposeSuffix } from "./transpose.svelte"
 
-async function createDragIcon(
-    packImagePath: string,
-    packId: string
-): Promise<string> {
-    const cacheDir = await appCacheDir()
-    const iconPath = await join(cacheDir, `${packId}.png`)
-
-    if (!(await exists(iconPath))) {
-        // Ensure cache directory exists
-        if (!(await exists(cacheDir))) {
-            await mkdir(cacheDir)
-        }
-
-        // Read the saved pack image file
-        const imageData = await readFile(packImagePath)
-        const buffer = new ArrayBuffer(imageData.byteLength)
-        const view = new Uint8Array(buffer)
-        view.set(imageData)
-        const resizedImageData = await resizeImageToCorner(buffer)
-        const file = await create(iconPath)
-        await file.write(resizedImageData)
-        await file.close()
-    }
-
-    return iconPath
-}
-
-async function createInvisibleIcon(): Promise<string> {
-    const cacheDir = await appCacheDir()
-    const iconPath = await join(cacheDir, "invisible-drag-icon.png")
-
-    if (!(await exists(iconPath))) {
-        if (!(await exists(cacheDir))) {
-            await mkdir(cacheDir)
-        }
-
-        const transparentPng = new Uint8Array([
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-            0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x02, 0x00, 0x00,
-            0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
-            0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-        ])
-
-        const file = await create(iconPath)
-        await file.write(transparentPng)
-        await file.close()
-    }
-
-    return iconPath
-}
-
-async function resizeImageToCorner(
-    imageBuffer: ArrayBuffer
-): Promise<Uint8Array> {
-    return new Promise((resolve, reject) => {
-        const blob = new Blob([imageBuffer])
-        const img = new Image()
-        const url = URL.createObjectURL(blob)
-        const iconSize = 64
-        img.onerror = () => {
-            URL.revokeObjectURL(url)
-            reject(new Error("Could not decode pack artwork"))
-        }
-        img.onload = () => {
-            URL.revokeObjectURL(url)
-            const canvasWidth = iconSize * 2
-            const canvasHeight = iconSize * 2.5
-            const canvas = document.createElement("canvas")
-            const ctx = canvas.getContext("2d")!
-
-            canvas.width = canvasWidth
-            canvas.height = canvasHeight
-
-            // Transparent background
-            ctx.clearRect(0, 0, canvasWidth, canvasHeight)
-
-            // Position the image in the top-right corner of the canvas
-            const x = canvasWidth - iconSize
-            const y = 0
-
-            ctx.drawImage(img, x, y, iconSize, iconSize)
-
-            canvas.toBlob((blob) => {
-                if (!blob) {
-                    reject(new Error("Could not encode drag icon"))
-                    return
-                }
-                blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject)
-            }, "image/png")
-        }
-        img.src = url
-    })
-}
-
-type DragData = { path: string; iconPath: string }
-
-// Cache the on-disk WAV + drag icon per sample (keyed by uuid + transpose, since
-// the saved path depends on the transpose suffix), so that the actual drag can be
-// started synchronously.
-const dragCache = new SvelteMap<string, DragData>()
-const inFlight = new Map<string, Promise<DragData | null>>()
+const dragCache = new SvelteMap<string, string>()
+const inFlight = new Map<string, Promise<string | null>>()
 
 export type DragTempo = { source: "bridge" | "manual"; bpm: number }
 
@@ -131,31 +29,15 @@ export function isSampleDragReady(sample: SampleAsset, tempo?: DragTempo) {
     return dragCache.has(sampleDragKey(sample, tempo))
 }
 
-async function dragIconForSample(sampleAsset: SampleAsset) {
-    try {
-        const pack = sampleAsset.parents.items[0] as PackAsset
-        const packImagePath = await savePackImage(sampleAsset)
-        if (packImagePath && (await exists(packImagePath))) {
-            return await createDragIcon(packImagePath, pack.uuid)
-        }
-    } catch (error) {
-        console.debug("Could not use pack artwork for the drag icon", error)
-    }
-    return await createInvisibleIcon()
-}
-
-/**
- * Prepares a sample for dragging: descrambles + writes the WAV and builds the
- * drag icon, caching the result. Idempotent and deduplicated, and cheap once the
- * files already exist on disk. Call this ahead of the drag gesture (on hover /
- * pointerdown) so `handleSampleDrag` has everything ready synchronously.
- */
 export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo, background = false) {
     const key = sampleDragKey(sampleAsset, tempo)
     const cached = dragCache.get(key)
     if (cached) return Promise.resolve(cached)
     const existing = inFlight.get(key)
-    if (existing) return existing
+    if (existing) {
+        if (!background) prioritizeSampleDownload(sampleAsset.uuid)
+        return existing
+    }
 
     const pending = (async () => {
         const finishLoad = background ? null : beginSampleLoad(sampleAsset.uuid)
@@ -163,12 +45,10 @@ export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo, 
             const path = tempo?.source === "bridge"
                 ? await saveDawStretchedSample(sampleAsset, tempo.bpm)
                 : tempo
-                  ? await saveTempoAlignedSample(sampleAsset, tempo.bpm)
+                  ? await saveTempoAlignedSample(sampleAsset, tempo.bpm, background)
                   : await saveSample(sampleAsset)
-            const iconPath = await dragIconForSample(sampleAsset)
-            const data = { path, iconPath }
-            dragCache.set(key, data)
-            return data
+            dragCache.set(key, path)
+            return path
         } catch (error) {
             console.error("Failed preparing WAV for drag", error)
             return null
@@ -181,27 +61,133 @@ export function prefetchSampleDrag(sampleAsset: SampleAsset, tempo?: DragTempo, 
     return pending
 }
 
-/** The macOS native drag must start while the current drag event is still active. */
-export function handleSampleDrag(event: DragEvent, sampleAsset: SampleAsset, tempo?: DragTempo) {
-    event.preventDefault()
-    if (!isSamplesDirValid()) {
-        settingsDialog.open = true
-        return
-    }
-    const data = dragCache.get(sampleDragKey(sampleAsset, tempo))
-    if (data) {
-        void startDrag({ item: [data.path], icon: data.iconPath }).catch((error) =>
-            console.error("Could not start sample drag", error)
-        )
+type DragTarget = { sample: SampleAsset; tempo?: DragTempo }
+type ResolveDragTarget = (event: MouseEvent) => DragTarget | null
+
+function nativeDrag(path: string, key: string) {
+    return startDrag({ item: [path], icon: dragIcon }).catch((error) => {
+        if (dragCache.get(key) === path) dragCache.delete(key)
+        console.error("Could not start sample drag", error)
+    })
+}
+
+export function sampleDrag(node: HTMLElement, resolveTarget: ResolveDragTarget) {
+    const listeners = new AbortController()
+    const options = { signal: listeners.signal }
+    let hoverTimer: number | undefined
+    let cancelGesture: (() => void) | undefined
+    let suppressClick = false
+
+    if (navigator.userAgent.includes("Windows")) {
+        // Starting an HTML drag cancels pointer tracking. Keep the same mouse
+        // gesture alive until Windows can take over with the actual file path.
+        node.draggable = false
+        node.addEventListener("pointerdown", (event) => {
+            suppressClick = false
+            cancelGesture?.()
+            const target = resolveTarget(event)
+            if (!target || event.button !== 0 || event.pointerType !== "mouse") return
+
+            const { pointerId, clientX, clientY } = event
+            const press = new AbortController()
+            const duringPress = { signal: press.signal }
+            let dragged = false
+            let active = true
+
+            function cancel() {
+                active = false
+                press.abort()
+                if (node.hasPointerCapture(pointerId)) node.releasePointerCapture(pointerId)
+                cancelGesture = undefined
+            }
+
+            function end(event: PointerEvent) {
+                if (event.pointerId === pointerId) cancel()
+            }
+
+            cancelGesture = cancel
+            node.setPointerCapture(pointerId)
+            node.addEventListener("pointerup", end, duringPress)
+            node.addEventListener("pointercancel", end, duringPress)
+            node.addEventListener("lostpointercapture", end, duringPress)
+            window.addEventListener("blur", cancel, duringPress)
+            window.addEventListener("keydown", (event) => {
+                if (event.key === "Escape") cancel()
+            }, duringPress)
+
+            node.addEventListener("pointermove", async (event) => {
+                if (event.pointerId !== pointerId) return
+                if ((event.buttons & 1) === 0) {
+                    cancel()
+                    return
+                }
+                if (dragged || Math.hypot(event.clientX - clientX, event.clientY - clientY) < 5) return
+
+                dragged = true
+                suppressClick = true
+                if (!isSamplesDirValid()) {
+                    cancel()
+                    settingsDialog.open = true
+                    return
+                }
+
+                const key = sampleDragKey(target.sample, target.tempo)
+                const path = dragCache.get(key) ?? await prefetchSampleDrag(target.sample, target.tempo)
+                if (path && active) {
+                    const current = resolveTarget(event)
+                    if (current && sampleDragKey(current.sample, current.tempo) === key) {
+                        // Give up WebView pointer capture before OLE takes over.
+                        cancel()
+                        void nativeDrag(path, key)
+                    }
+                }
+            }, duringPress)
+        }, options)
+
+        node.addEventListener("click", (event) => {
+            if (!suppressClick || event.detail === 0) return
+            suppressClick = false
+            event.preventDefault()
+            event.stopImmediatePropagation()
+        }, { ...options, capture: true })
     } else {
-        const pending = inFlight.has(sampleDragKey(sampleAsset, tempo))
-        if (pending) {
-            toast({ title: "WAV is preparing", description: "Drag again when it is ready.", duration: 2500 })
-        } else {
-            void prefetchSampleDrag(sampleAsset, tempo).then((ready) => {
-                if (ready) toast({ title: "WAV ready to drag", duration: 2500 })
-            })
+        node.draggable = true
+        const warm = (event: MouseEvent) => {
+            const target = resolveTarget(event)
+            if (target && isSamplesDirValid()) void prefetchSampleDrag(target.sample, target.tempo)
         }
+        node.addEventListener("pointerenter", (event) => {
+            hoverTimer = window.setTimeout(() => warm(event), 120)
+        }, options)
+        node.addEventListener("pointerleave", () => window.clearTimeout(hoverTimer), options)
+        node.addEventListener("pointerdown", (event) => {
+            if (event.button === 0) warm(event)
+        }, options)
+        node.addEventListener("dragstart", (event) => {
+            event.preventDefault()
+            const target = resolveTarget(event)
+            if (!target) return
+            if (!isSamplesDirValid()) {
+                settingsDialog.open = true
+                return
+            }
+            const key = sampleDragKey(target.sample, target.tempo)
+            const path = dragCache.get(key)
+            // AppKit starts the native session from the current drag event.
+            if (path) void nativeDrag(path, key)
+            else void prefetchSampleDrag(target.sample, target.tempo)
+        }, options)
+    }
+
+    return {
+        update(next: ResolveDragTarget) {
+            resolveTarget = next
+        },
+        destroy() {
+            cancelGesture?.()
+            window.clearTimeout(hoverTimer)
+            listeners.abort()
+        },
     }
 }
 

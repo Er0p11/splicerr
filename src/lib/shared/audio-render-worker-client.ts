@@ -71,7 +71,7 @@ async function copyAudioBufferChannels(
             throwIfAborted(signal)
             const end = Math.min(buffer.length, offset + chunkFrames)
             destination.set(source.subarray(offset, end), offset)
-            await nextFrame()
+            if (end < buffer.length) await nextFrame()
         }
     }
 

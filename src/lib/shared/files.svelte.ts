@@ -26,6 +26,7 @@ type EncodeOptions = {
     shouldCancel?: () => boolean
     releaseSourceAfterRender?: boolean
     signal?: AbortSignal
+    backgroundDownload?: boolean
 }
 
 export function safePathPart(part: string) {
@@ -73,7 +74,7 @@ async function writeFileChunked(filePath: string, data: Uint8Array) {
                 const written = await file.write(data.subarray(offset, offset + chunkSize))
                 if (!written) throw new Error("Could not write WAV data")
                 offset += written
-                await nextFrame()
+                if (offset < data.byteLength) await nextFrame()
             }
         } finally {
             await file.close()
@@ -135,7 +136,7 @@ async function encodeSampleWavWithDuration(
                   signal: options.signal,
               })
           })()
-        : await decodeAudioFromURL(await getDescrambledSampleURL(sampleAsset), {
+        : await decodeAudioFromURL(await getDescrambledSampleURL(sampleAsset, options.backgroundDownload), {
               signal: options.signal,
           })
 
@@ -194,7 +195,8 @@ export async function saveSample(sampleAsset: SampleAsset) {
     const semitones = semitonesFor(sampleAsset)
     const absolutePath = await absoluteSamplePath(
         sampleAsset,
-        transposeSuffix(semitones)
+        transposeSuffix(semitones),
+        true
     )
 
     if (!absolutePath) {
@@ -281,7 +283,7 @@ export async function saveDawStretchedSample(
     return (await saveDawStretchedSampleInfo(sampleAsset, dawBpm)).path
 }
 
-export async function saveTempoAlignedSample(sampleAsset: SampleAsset, bpm: number) {
+export async function saveTempoAlignedSample(sampleAsset: SampleAsset, bpm: number, backgroundDownload = false) {
     const tempoRatio = manualTempoRatio(sampleAsset, bpm)
     if (tempoRatio === null) throw new Error("Sample cannot be aligned to that BPM")
 
@@ -292,7 +294,7 @@ export async function saveTempoAlignedSample(sampleAsset: SampleAsset, bpm: numb
         true
     )
     if (!(await exists(path))) {
-        const wav = await encodeSampleWav(sampleAsset, semitones, tempoRatio)
+        const wav = await encodeSampleWav(sampleAsset, semitones, tempoRatio, true, { backgroundDownload })
         await writeFileChunked(path, wav)
     }
     return path
@@ -303,60 +305,8 @@ export function originalWavPath(sample: SampleAsset, suffix = "") {
 }
 
 export async function saveOriginalWav(sample: SampleAsset, path: string) {
-    if (!(await exists(path))) await writeFileChunked(path, await encodeSampleWav(sample, 0))
-}
-
-export async function absolutePackImagePath(sampleAsset: SampleAsset) {
-    if (!config.samples_dir) {
-        throw new Error("❌ Samples Directory not set")
-    }
-
-    if (!isSamplesDirValid()) {
-        throw new Error("❌ Samples Directory invalid")
-    }
-
-    const pack = sampleAsset.parents.items[0]
-    const packDir = sanitizePath(pack.name)
-    return await join(config.samples_dir, packDir, "cover.jpg")
-}
-
-export async function savePackImage(sampleAsset: SampleAsset) {
-    const pack = sampleAsset.parents.items[0]
-    const packImageUrl = pack?.files[0].url
-
-    const absolutePath = await absolutePackImagePath(sampleAsset)
-
-    if (!absolutePath) {
-        throw new Error("❌ Invalid path")
-    }
-
-    if (await exists(absolutePath)) {
-        console.log("🗃️ Image already exists at", absolutePath)
-        return absolutePath
-    }
-
-    try {
-        const response = await fetch(packImageUrl)
-        if (!response.ok) throw new Error("Failed to fetch image")
-        const buffer = await response.arrayBuffer()
-
-        console.log("🖼️ Saving pack image at", absolutePath)
-
-        await ensureFileDirectoryExists(absolutePath)
-
-        const file = await create(absolutePath)
-        await file.write(new Uint8Array(buffer))
-        await file.close()
-
-        console.log("🎉 Pack image saved!")
-
-        return absolutePath
-    } catch (e: any) {
-        console.log(e.message)
-        if (e instanceof TypeError && (e.message.includes("Failed to fetch") || e.message.includes("Load failed"))) {
-            console.warn("⚠️ CORS error or network issue when fetching pack image", e)
-            return null
-        }
-        throw e
+    if (!(await exists(path))) {
+        const wav = await encodeSampleWav(sample, 0, 1, true, { backgroundDownload: true })
+        await writeFileChunked(path, wav)
     }
 }

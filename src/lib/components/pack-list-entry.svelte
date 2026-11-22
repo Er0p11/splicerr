@@ -5,11 +5,12 @@
     import type { PackAsset } from "$lib/splice/types"
     import { openPack } from "$lib/shared/view.svelte"
     import { LIKES_UUID, isPackInCollection } from "$lib/shared/collections.svelte"
-    import { packDownloads } from "$lib/shared/pack-download.svelte"
+    import { packDownloadResults, packDownloads } from "$lib/shared/pack-download.svelte"
 
     let { pack, collectionUuid = null }: { pack: PackAsset; collectionUuid?: string | null } = $props()
     const favorite = $derived(isPackInCollection(LIKES_UUID, pack.uuid))
     const download = $derived(packDownloads.get(pack.uuid))
+    const result = $derived(packDownloadResults.get(pack.uuid))
 </script>
 
 <div class="glass-row flex shrink-0 items-center gap-3 rounded-xl p-2" data-pack-row={pack.uuid}>
@@ -21,6 +22,8 @@
                 <span class="text-xs tabular-nums text-muted-foreground">
                     {download.total ? `${download.done} of ${download.total} WAVs` : "Preparing pack…"}
                 </span>
+            {:else if result}
+                <span class="truncate text-xs text-muted-foreground">{result.summary}</span>
             {/if}
         </span>
     </button>

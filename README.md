@@ -30,7 +30,7 @@ Please show your appreciation by starring ⭐ the [original project](https://git
 - **Audition samples** by clicking a row. Click it again to restart. The waveform still seeks, and the pack thumbnail fills as its audio downloads.
 - **Browse packs** from the Packs view or choose **Show pack samples** from a thumbnail. Save a whole pack to Likes or a collection, or download its available previews as WAVs to the configured **Samples Directory** or a folder you choose.
 - **Align BPM** applies one target tempo to previews and dragged WAVs when source BPM is available. It works without a DAW Bridge. Turn on **Pre-render aligned WAVs** in the same menu to prepare the selected and buffered samples in the background. Transpose by key or semitones is in that menu too.
-- **Preload previews** under Settings sets how many previews to buffer from the first visible row. The default is 12. Set it to 0 to turn it off.
+- **Preload previews** under Settings sets how many previews to buffer from the first visible row. The default is 12. Set it to 0 to turn it off. **Parallel sample downloads** sets how many previews or pack samples can download at once.
 - Use **Reshuffle** to change the result order, **Always on top** to keep Splicerr above the DAW, and **Compact view** to narrow the window.
 
 Live tempo previews use the WebView's pitch-preserving playback. WAV export uses [SoundTouch](https://soundtouch.surina.net/README.html) in a background worker. Tempo alignment preserves pitch. The separate Transpose control changes it when enabled.

@@ -1,7 +1,6 @@
 import type { SampleAsset } from "$lib/splice/types"
 import { config } from "$lib/shared/config.svelte"
 import { getPlaybackSampleURL } from "$lib/shared/store.svelte"
-import { toast } from "$lib/shared/toasts.svelte"
 
 let playbackRequest = 0
 let loadedAssetUuid: string | null = null
@@ -70,7 +69,6 @@ export const globalAudio = $state({
         } catch (error) {
             if (request !== playbackRequest || (error instanceof DOMException && error.name === "AbortError")) return
             console.error("Failed to play sample", error)
-            toast({ title: "Could not play sample", variant: "error" })
         } finally {
             if (request === playbackRequest) this.loading = false
         }

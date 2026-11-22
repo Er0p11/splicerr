@@ -1,5 +1,6 @@
 <script lang="ts">
     import { cn } from "$lib/utils"
+    import { SvelteMap } from "svelte/reactivity"
     import Button from "$lib/components/ui/button/button.svelte"
     import Input from "$lib/components/ui/input/input.svelte"
     import Label from "$lib/components/ui/label/label.svelte"
@@ -18,6 +19,7 @@
     import Pencil from "lucide-svelte/icons/pencil"
     import Trash2 from "lucide-svelte/icons/trash-2"
     import Download from "lucide-svelte/icons/download"
+    import FolderOpen from "lucide-svelte/icons/folder-open"
     import LoaderCircle from "lucide-svelte/icons/loader-circle"
     import {
         deleteCollection,
@@ -31,7 +33,6 @@
         exportCollectionToZip,
         exportState,
     } from "$lib/shared/export.svelte"
-    import { toast } from "$lib/shared/toasts.svelte"
     import { revealItemInDir } from "@tauri-apps/plugin-opener"
     import { openBrowse, openCollection, openPacks, viewStore } from "$lib/shared/view.svelte"
 
@@ -46,10 +47,8 @@
 
     const commitEdit = () => {
         if (!editTarget) return
-        const name = editName.trim()
         renameCollection(editTarget.uuid, editName)
         editTarget = null
-        if (name) toast({ title: "Collection updated", description: name })
     }
 
     // Collection pending delete confirmation, if any
@@ -63,34 +62,20 @@
         ) {
             openBrowse()
         }
-        const name = deleteTarget.name
         deleteCollection(deleteTarget.uuid)
+        exportResults.delete(deleteTarget.uuid)
         deleteTarget = null
-        toast({
-            title: "Collection deleted",
-            description: name,
-            variant: "destructive",
-        })
     }
+
+    const exportResults = new SvelteMap<string, { path?: string; error?: string }>()
 
     const handleExport = async (uuid: string) => {
         try {
             const path = await exportCollectionToZip(uuid)
-            if (path) {
-                toast({
-                    title: "Collection exported",
-                    description: path,
-                    variant: "success",
-                    onClick: () => revealItemInDir(path),
-                })
-            }
+            if (path) exportResults.set(uuid, { path })
         } catch (e) {
             console.error("⚠️ Collection export failed", e)
-            toast({
-                title: "Export failed",
-                description: e instanceof Error ? e.message : String(e),
-                variant: "error",
-            })
+            exportResults.set(uuid, { error: e instanceof Error ? e.message : "Export failed." })
         }
     }
 </script>
@@ -183,6 +168,7 @@
                     </div>
                 {/if}
                 {#each userCollections() as collection (collection.uuid)}
+                {@const exportResult = exportResults.get(collection.uuid)}
                 {@const active =
                     viewStore.mode === "collection" &&
                     viewStore.collectionUuid === collection.uuid}
@@ -229,6 +215,16 @@
                             >
                                 <Download size="14" /> Export collection
                             </Popover.Close>
+                            {#if exportResult?.path}
+                                <Popover.Close
+                                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted"
+                                    onclick={() => revealItemInDir(exportResult.path!)}
+                                >
+                                    <FolderOpen size="14" /> Show exported file
+                                </Popover.Close>
+                            {:else if exportResult?.error}
+                                <p class="px-2 py-1 text-xs text-muted-foreground">{exportResult.error}</p>
+                            {/if}
                             <Popover.Close
                                 class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-destructive hover:bg-muted"
                                 onclick={() =>

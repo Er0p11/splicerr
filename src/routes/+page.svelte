@@ -261,7 +261,8 @@
 
     $effect(() => {
         const samples = bufferWindow
-        untrack(() => setSamplePreloadWindow(samples))
+        const limit = config.parallel_sample_downloads
+        untrack(() => setSamplePreloadWindow(samples, limit))
     })
 
     $effect(() => {

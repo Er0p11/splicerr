@@ -12,6 +12,7 @@ import { resetMode, setMode } from "mode-watcher"
 
 const CONFIG_FILE_NAME = "config.json"
 export const MAX_PRELOAD_SAMPLES = 30
+export const MAX_PARALLEL_SAMPLE_DOWNLOADS = 8
 export const MIN_MANUAL_BPM = 20
 export const MAX_MANUAL_BPM = 400
 
@@ -27,6 +28,12 @@ export function normalizePreloadCount(value: unknown) {
     return typeof value === "number" && Number.isFinite(value)
         ? Math.max(0, Math.min(MAX_PRELOAD_SAMPLES, Math.round(value)))
         : DEFAULT_CONFIG.preload_samples
+}
+
+export function normalizeParallelDownloads(value: unknown) {
+    return typeof value === "number" && Number.isFinite(value)
+        ? Math.max(1, Math.min(MAX_PARALLEL_SAMPLE_DOWNLOADS, Math.round(value)))
+        : DEFAULT_CONFIG.parallel_sample_downloads
 }
 
 export type UITheme = "system" | "light" | "dark" | "dre4moff"
@@ -57,6 +64,7 @@ const DEFAULT_CONFIG = {
     cut_mp3_delay: true,
     repeat_audio: true,
     preload_samples: 12,
+    parallel_sample_downloads: 2,
     manual_bpm: null as number | null,
     prepare_aligned_wavs: false,
     always_on_top: false,
@@ -111,6 +119,7 @@ export async function loadConfig() {
         config.transpose = transpose
         config.manual_bpm = normalizeManualBpm(config.manual_bpm)
         config.preload_samples = normalizePreloadCount(config.preload_samples)
+        config.parallel_sample_downloads = normalizeParallelDownloads(config.parallel_sample_downloads)
         console.log("📂 Config loaded")
     }
 

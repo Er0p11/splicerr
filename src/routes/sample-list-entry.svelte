@@ -17,7 +17,7 @@
     import { cn, formatKey } from "$lib/utils"
     import { loading, sampleDownloads } from "$lib/shared/loading.svelte"
     import { assetIcons } from "$lib/shared/icons.svelte"
-    import { handleSampleDrag, manualDragTempo } from "$lib/shared/drag.svelte"
+    import { sampleDrag, manualDragTempo } from "$lib/shared/drag.svelte"
     import {
         dawSync,
         setDawSyncedPlaybackEnabled,
@@ -119,20 +119,17 @@
 <div
     role="presentation"
     class={cn(
-        "glass-row flex shrink-0 items-center justify-between p-2 rounded-2xl cursor-pointer",
+        "glass-row flex shrink-0 select-none items-center justify-between p-2 rounded-2xl cursor-grab active:cursor-grabbing",
         windowView.compact ? "gap-2" : "gap-4",
         selected && "glass-row-selected",
         className
     )}
     id={`sample-list-entry-${sampleAsset.uuid}`}
-    draggable="true"
+    use:sampleDrag={(event) => isRowSurface(event)
+        ? { sample: sampleAsset, tempo: dawSync.connected ? undefined : manualDragTempo(sampleAsset) }
+        : null}
     onclick={(event) => {
         if (isRowSurface(event)) playFromStart()
-    }}
-    ondragstart={(event) => {
-        if (isRowSurface(event)) {
-            handleSampleDrag(event, sampleAsset, dawSync.connected ? undefined : manualDragTempo(sampleAsset))
-        } else event.preventDefault()
     }}
 >
     {#if pack}

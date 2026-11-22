@@ -17,6 +17,8 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
 import { semitonesFor } from "./transpose.svelte"
 import { decodeAudioFromURL } from "./wav"
 import { renderAudioBufferToWav } from "$lib/shared/audio-render-worker-client"
+import { config } from "./config.svelte"
+import { dispatchSampleDownloads, enqueueSampleDownload } from "./sample-download-queue"
 
 export const DEFAULT_SORT = "relevance"
 export const PER_PAGE = 50
@@ -96,8 +98,7 @@ let lastPage = 0
 let preloadWindow = new Map<string, SampleAsset>()
 let attemptedPreloads = new Set<string>()
 let activePreloads = 0
-const MAX_PRELOAD_REQUESTS = 2
-const sourceDownloads = new Map<string, Promise<string>>()
+const sourceDownloads = new Map<string, { promise: Promise<string>; prioritize: () => void }>()
 
 async function fetchBinaryResponse(url: string, signal?: AbortSignal) {
     try {
@@ -119,10 +120,11 @@ function touchMapEntry<T>(map: Map<string, T>, key: string) {
 }
 
 function trimDescrambledCache() {
+    const recentLimit = Math.max(MAX_DESCRAMBLED_BLOBS, config.parallel_sample_downloads)
     let recent = 0
     for (const uuid of [...dataStore.descrambledSamples.keys()].reverse()) {
         if (uuid === globalAudio.currentAsset?.uuid || preloadWindow.has(uuid)) continue
-        if (++recent <= MAX_DESCRAMBLED_BLOBS) continue
+        if (++recent <= recentLimit) continue
 
         const blobURL = dataStore.descrambledSamples.get(uuid)!
         dataStore.descrambledSamples.delete(uuid)
@@ -208,21 +210,22 @@ export function setPackScope(packUuid: string | null) {
     fetchAssets()
 }
 
-export function setSamplePreloadWindow(samples: SampleAsset[]) {
+export function setSamplePreloadWindow(samples: SampleAsset[], limit = config.parallel_sample_downloads) {
     preloadWindow = new Map(samples.map((sample) => [sample.uuid, sample]))
     attemptedPreloads = new Set([...attemptedPreloads].filter((uuid) => preloadWindow.has(uuid)))
     trimDescrambledCache()
-    fillPreloadSlots()
+    dispatchSampleDownloads()
+    fillPreloadSlots(limit)
 }
 
-function fillPreloadSlots() {
+function fillPreloadSlots(limit = config.parallel_sample_downloads) {
     for (const sample of preloadWindow.values()) {
-        if (activePreloads >= MAX_PRELOAD_REQUESTS) break
+        if (activePreloads >= limit) break
         if (dataStore.descrambledSamples.has(sample.uuid) || attemptedPreloads.has(sample.uuid)) continue
 
         attemptedPreloads.add(sample.uuid)
         activePreloads++
-        void getDescrambledSampleURL(sample)
+        void getDescrambledSampleURL(sample, true)
             .catch((error) => console.debug("Preview preload failed", sample.uuid, error))
             .finally(() => {
                 activePreloads--
@@ -231,20 +234,28 @@ function fillPreloadSlots() {
     }
 }
 
-export function getDescrambledSampleURL(sampleAsset: SampleAsset): Promise<string> {
+export function prioritizeSampleDownload(uuid: string) {
+    sourceDownloads.get(uuid)?.prioritize()
+}
+
+export function getDescrambledSampleURL(sampleAsset: SampleAsset, background = false): Promise<string> {
     const uuid = sampleAsset.uuid
     const cached = touchMapEntry(dataStore.descrambledSamples, uuid)
     if (cached) return Promise.resolve(cached)
     const pending = sourceDownloads.get(uuid)
-    if (pending) return pending
+    if (pending) {
+        if (!background) pending.prioritize()
+        return pending.promise
+    }
 
-    const download = downloadSampleBytes(sampleAsset).then((bytes) => {
+    const transfer = enqueueSampleDownload(() => downloadSampleBytes(sampleAsset), background)
+    const download = transfer.promise.then((bytes) => {
         const url = window.URL.createObjectURL(new Blob([bytes], { type: "audio/mp3" }))
         dataStore.descrambledSamples.set(uuid, url)
         trimDescrambledCache()
         return url
     }).finally(() => sourceDownloads.delete(uuid))
-    sourceDownloads.set(uuid, download)
+    sourceDownloads.set(uuid, { promise: download, prioritize: transfer.prioritize })
     return download
 }
 
@@ -256,7 +267,7 @@ export async function getDescrambledSampleBytes(sampleAsset: SampleAsset, signal
             const response = await window.fetch(cached, { signal })
             return new Uint8Array(await response.arrayBuffer())
         }
-        return await downloadSampleBytes(sampleAsset, signal)
+        return await enqueueSampleDownload(() => downloadSampleBytes(sampleAsset, signal), false, signal).promise
     } finally {
         finishLoad()
     }

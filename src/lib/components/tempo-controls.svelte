@@ -13,9 +13,8 @@
     } from "$lib/shared/config.svelte"
     import { dawSync } from "$lib/shared/daw-sync.svelte"
     import {
-        handleSampleDrag, isSampleDragReady, manualDragTempo, prefetchSampleDrag, sampleDragKey, type DragTempo,
+        sampleDrag, isSampleDragReady, manualDragTempo, prefetchSampleDrag, sampleDragKey, type DragTempo,
     } from "$lib/shared/drag.svelte"
-    import { toast } from "$lib/shared/toasts.svelte"
 
     let { asset }: { asset: SampleAsset | null } = $props()
     let open = $state(false)
@@ -49,7 +48,6 @@
         open = false
         void saveConfig().catch((error) => {
             console.error("Could not save BPM setting", error)
-            toast({ title: "Could not save BPM setting", variant: "error" })
         })
     }
 </script>
@@ -91,7 +89,6 @@
                         config.prepare_aligned_wavs = event.currentTarget.checked
                         void saveConfig().catch((error) => {
                             console.error("Could not save WAV setting", error)
-                            toast({ title: "Could not save WAV setting", variant: "error" })
                         })
                     }} />
                 <span>
@@ -112,11 +109,8 @@
 {#if asset && tempo}
     <button
         type="button"
-        class={[
-            "flex h-11 w-36 shrink-0 items-center gap-2 rounded-lg border border-primary/35 bg-primary/10 px-3 text-left text-sm hover:bg-primary/20",
-            status === "ready" && "cursor-grab active:cursor-grabbing",
-        ]}
-        draggable={status === "ready"}
+        class="flex h-11 w-36 shrink-0 cursor-grab select-none items-center gap-2 rounded-lg border border-primary/35 bg-primary/10 px-3 text-left text-sm hover:bg-primary/20 active:cursor-grabbing"
+        use:sampleDrag={() => asset && tempo ? { sample: asset, tempo } : null}
         title={status === "ready" ? "Drag the WAV into your DAW" : "Prepare a tempo-aligned WAV"}
         onmouseenter={() => status !== "failed" && void prepare()}
         onfocus={() => status !== "failed" && void prepare()}
@@ -124,7 +118,6 @@
             if (!isSamplesDirValid()) settingsDialog.open = true
             else void prepare()
         }}
-        ondragstart={(event) => handleSampleDrag(event, asset!, tempo!)}
     >
         {#if status === "loading"}
             <LoaderCircle class="size-5 animate-spin" />

@@ -1,6 +1,5 @@
 import { currentMonitor, getCurrentWindow, LogicalSize } from "@tauri-apps/api/window"
 import { config, saveConfig } from "./config.svelte"
-import { toast } from "./toasts.svelte"
 
 const COMPACT_WIDTH = 500
 let wasMaximized = false
@@ -9,7 +8,6 @@ export const windowView = $state({ compact: false, changingSize: false, changing
 
 function reportWindowError(error: unknown) {
     console.error("Could not update window", error)
-    toast({ title: "Could not update window", variant: "error" })
 }
 
 export async function restoreWindowView() {

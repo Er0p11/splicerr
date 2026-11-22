@@ -11,7 +11,9 @@
     import {
         config,
         MAX_PRELOAD_SAMPLES,
+        MAX_PARALLEL_SAMPLE_DOWNLOADS,
         normalizePreloadCount,
+        normalizeParallelDownloads,
         isSamplesDirValid,
         saveConfig,
         settingsDialog,
@@ -228,6 +230,28 @@
                     onchange={(event) => {
                         const count = normalizePreloadCount(event.currentTarget.valueAsNumber)
                         config.preload_samples = count
+                        event.currentTarget.value = String(count)
+                        void saveConfig()
+                    }}
+                />
+            </div>
+            <div class="flex flex-col gap-2">
+                <Label for="parallel-downloads">Parallel sample downloads</Label>
+                <p class="text-muted-foreground text-sm" id="parallel-downloads-description">
+                    Maximum simultaneous audio downloads for previews and packs. Playback and drag requests go first in the queue.
+                </p>
+                <Input
+                    id="parallel-downloads"
+                    aria-describedby="parallel-downloads-description"
+                    class="w-28"
+                    type="number"
+                    min={1}
+                    max={MAX_PARALLEL_SAMPLE_DOWNLOADS}
+                    step={1}
+                    value={config.parallel_sample_downloads}
+                    onchange={(event) => {
+                        const count = normalizeParallelDownloads(event.currentTarget.valueAsNumber)
+                        config.parallel_sample_downloads = count
                         event.currentTarget.value = String(count)
                         void saveConfig()
                     }}
